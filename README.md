@@ -18,7 +18,32 @@ Learn more about why we built this and how it fits into the evolving AI developm
 
 ## Installation
 
-### 1. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+### 1. Generate API Key
+
+Generate an API key from your ZeroPath organization settings at [https://zeropath.com/app/settings/api](https://zeropath.com/app/settings/api)
+
+### 2. Configure Environment Variables
+
+Set up your environment variables with the API key:
+
+```bash
+export ZEROPATH_TOKEN_ID=your_token_id
+export ZEROPATH_TOKEN_SECRET=your_token_secret
+```
+
+### 3. Retrieve Your Organization ID
+
+Run the following command to get your organization ID:
+
+```bash
+curl -X POST https://zeropath.com/api/v1/orgs/list \
+    -H "X-ZeroPath-API-Token-Id: $ZEROPATH_TOKEN_ID" \
+    -H "X-ZeroPath-API-Token-Secret: $ZEROPATH_TOKEN_SECRET" \
+    -H "Content-Type: application/json" \
+    -d '{}'
+```
+
+### 4. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 
 We use `uv` for dependency management:
 
@@ -26,12 +51,13 @@ We use `uv` for dependency management:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Clone and sync dependencies
+### 5. Clone and Setup
 
 ```bash
 git clone https://github.com/ZeroPathAI/zeropath-mcp-server.git
 cd zeropath-mcp-server
 uv sync
+export ZEROPATH_ORG_ID=your_org_id
 ```
 
 ---
