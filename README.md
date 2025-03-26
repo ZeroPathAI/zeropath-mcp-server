@@ -78,7 +78,7 @@ These can be generated from your ZeroPath dashboard.
 
 Once connected, the following tools are exposed to your AI assistant:
 
-### `search_vulnerabilities(searchQuery: str)`
+### `search_vulnerabilities(search_query: str)`
 
 Query SAST issues by keyword.
 
