@@ -21,7 +21,7 @@ if not token_id or not token_secret or not org_id:
 mcp = FastMCP("Zeropath")
 
 @mcp.tool()
-def search_vulnerabilities(searchQuery=None):
+def search_vulnerabilities(search_query=None):
     """
     Search for vulnerabilities using the Zeropath API with a simple search query.
     """
@@ -39,8 +39,8 @@ def search_vulnerabilities(searchQuery=None):
     payload = {}
     
     # Add search query if provided
-    if searchQuery:
-        payload["searchQuery"] = searchQuery
+    if search_query:
+        payload["searchQuery"] = search_query
     
     # Add org_id if available
     if org_id:
