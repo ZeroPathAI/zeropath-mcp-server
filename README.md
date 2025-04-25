@@ -1,3 +1,5 @@
+[![MseeP Badge](https://mseep.net/pr/zeropathai-zeropath-mcp-server-badge.jpg)](https://mseep.ai/app/zeropathai-zeropath-mcp-server)
+
 # ZeroPath MCP Server
 
 Interact with your product security findings using natural language.
