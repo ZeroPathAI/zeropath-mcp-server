@@ -4,6 +4,7 @@ ZeroPath MCP Server
 Provides tools for interacting with ZeroPath security findings via the MCP protocol.
 """
 
+import json
 import os
 import requests
 from mcp.server.fastmcp import FastMCP
@@ -316,7 +317,7 @@ def generate_patch(issue_id: str) -> str:
 # =============================================================================
 
 @mcp.tool()
-def start_scan(repository_ids: list[str]) -> str:
+def start_scan(repository_ids: list[str] = None) -> str:
     """
     Start a new security scan on one or more repositories.
 
@@ -325,6 +326,14 @@ def start_scan(repository_ids: list[str]) -> str:
     """
     if not repository_ids:
         return "Error: At least one repository ID is required"
+
+    # Handle case where repository_ids might be passed as a JSON string
+    if isinstance(repository_ids, str):
+        try:
+            repository_ids = json.loads(repository_ids)
+        except json.JSONDecodeError:
+            # If it's a single ID as a string, wrap it in a list
+            repository_ids = [repository_ids]
 
     response, error = make_api_request(
         "scans/start",
@@ -680,7 +689,7 @@ def get_sca_vulnerability(vulnerability_id: str) -> str:
 
     response, error = make_api_request(
         "sca/vulnerabilities/get",
-        {"vulnerabilityId": vulnerability_id}
+        {"id": vulnerability_id}
     )
 
     if error:
