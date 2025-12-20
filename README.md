@@ -1,3 +1,5 @@
+[![MseeP Badge](https://mseep.net/pr/zeropathai-zeropath-mcp-server-badge.jpg)](https://mseep.ai/app/zeropathai-zeropath-mcp-server)
+
 # ZeroPath MCP Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
