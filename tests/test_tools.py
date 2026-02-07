@@ -1,251 +1,289 @@
 """
-Tests for ZeroPath MCP Server Tools
+Tests for ZeroPath MCP Server (manifest-driven).
 
 Run with: uv run pytest tests/test_tools.py -v
 """
 
 import os
+
+# Ensure required environment variables exist before importing the server module.
+os.environ.setdefault("ZEROPATH_TOKEN_ID", "test-token-id")
+os.environ.setdefault("ZEROPATH_TOKEN_SECRET", "test-token-secret")
+os.environ.setdefault("ZEROPATH_ORG_ID", "org_test")
+os.environ.setdefault("ZEROPATH_BASE_URL", "https://example.com")
+
+import json
+
 import pytest
 
-# Check for required environment variables before importing
-REQUIRED_VARS = ["ZEROPATH_TOKEN_ID", "ZEROPATH_TOKEN_SECRET", "ZEROPATH_ORG_ID"]
-missing_vars = [var for var in REQUIRED_VARS if not os.getenv(var)]
-
-if missing_vars:
-    pytest.skip(
-        f"Missing required environment variables: {', '.join(missing_vars)}",
-        allow_module_level=True
-    )
-
-from zeropath_mcp_server.server import (
-    # Original tools
-    search_vulnerabilities,
-    get_issue,
-    approve_patch,
-    # Bug triage tools
-    mark_true_positive,
-    mark_false_positive,
-    archive_issue,
-    unarchive_issue,
-    generate_patch,
-    # Scan tools
-    start_scan,
-    list_scans,
-    # Repository tools
-    list_repositories,
-    # Stats tools
-    get_security_posture,
-    get_issues_by_vuln_class,
-    get_summary_statistics,
-    # SCA tools
-    list_sca_vulnerabilities,
-    get_sca_vulnerability,
-    list_sca_repositories,
-)
+import zeropath_mcp_server.trpc_client as trpc_client
+from zeropath_mcp_server import server
 
 
-class TestOriginalTools:
-    """Tests for the original 3 tools."""
-
-    def test_search_vulnerabilities_no_query(self):
-        """Test searching vulnerabilities without a query."""
-        result = search_vulnerabilities()
-        assert result is not None
-        assert "Error: Unauthorized" not in result or "Found" in result or "No vulnerability" in result
-
-    def test_search_vulnerabilities_with_query(self):
-        """Test searching vulnerabilities with a query."""
-        result = search_vulnerabilities(search_query="XSS")
-        assert result is not None
-        assert isinstance(result, str)
-
-    def test_get_issue_missing_id(self):
-        """Test get_issue with missing ID."""
-        result = get_issue("")
-        assert "Error" in result
-
-    def test_get_issue_invalid_id(self):
-        """Test get_issue with invalid ID."""
-        result = get_issue("invalid-id-12345")
-        assert result is not None  # Should return error or empty
-
-    def test_approve_patch_missing_id(self):
-        """Test approve_patch with missing ID."""
-        result = approve_patch("")
-        assert "Error" in result
-
-
-class TestBugTriageTools:
-    """Tests for bug triage tools."""
-
-    def test_mark_true_positive_missing_id(self):
-        """Test mark_true_positive with missing ID."""
-        result = mark_true_positive("")
-        assert "Error" in result
-
-    def test_mark_false_positive_missing_id(self):
-        """Test mark_false_positive with missing ID."""
-        result = mark_false_positive("")
-        assert "Error" in result
-
-    def test_archive_issue_missing_id(self):
-        """Test archive_issue with missing ID."""
-        result = archive_issue("")
-        assert "Error" in result
-
-    def test_unarchive_issue_missing_id(self):
-        """Test unarchive_issue with missing ID."""
-        result = unarchive_issue("")
-        assert "Error" in result
-
-    def test_generate_patch_missing_id(self):
-        """Test generate_patch with missing ID."""
-        result = generate_patch("")
-        assert "Error" in result
+SAMPLE_MANIFEST = {
+    "version": 1,
+    "generatedAt": "2026-01-01T00:00:00.000Z",
+    "tools": [
+        {
+            "name": "issues.list",
+            "trpcProcedure": "v2.issues.list",
+            "procedureType": "query",
+            "description": "List security issues",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "organizationId": {"type": "string"},
+                    "page": {"type": "integer"},
+                },
+            },
+            "orgIdBehavior": "inject-if-missing",
+        },
+        {
+            "name": "stats.assets",
+            "trpcProcedure": "v2.stats.assets",
+            "procedureType": "query",
+            "description": "Get asset stats",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "organizationId": {"type": "string"},
+                },
+                "required": ["organizationId"],
+            },
+            "orgIdBehavior": "required",
+        },
+        {
+            "name": "rules.get",
+            "trpcProcedure": "v2.rules.get",
+            "procedureType": "query",
+            "description": "Get a rule",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ruleId": {"type": "string"},
+                },
+                "required": ["ruleId"],
+            },
+            "orgIdBehavior": "none",
+        },
+    ],
+}
 
 
-class TestScanTools:
-    """Tests for scan management tools."""
+class TestBuildTools:
+    def test_parses_tools_from_manifest(self):
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST)
 
-    def test_start_scan_missing_repos(self):
-        """Test start_scan with missing repository IDs."""
-        result = start_scan([])
-        assert "Error" in result
+        assert len(tools) == 3
+        assert tools[0].name == "issues.list"
+        assert tools[0].description == "List security issues"
+        assert tools[0].inputSchema["type"] == "object"
 
-    def test_list_scans_default(self):
-        """Test list_scans with default parameters."""
-        result = list_scans()
-        assert result is not None
-        assert isinstance(result, str)
-        # Should return either scans or "No scans found"
-        assert "scan" in result.lower() or "error" in result.lower()
+    def test_builds_metadata_lookup(self):
+        _, metadata = server._build_tools(SAMPLE_MANIFEST)
 
-    def test_list_scans_with_pagination(self):
-        """Test list_scans with pagination."""
-        result = list_scans(page=1, page_size=5)
-        assert result is not None
+        assert metadata["issues.list"]["trpcProcedure"] == "v2.issues.list"
+        assert metadata["issues.list"]["orgIdBehavior"] == "inject-if-missing"
+        assert metadata["stats.assets"]["orgIdBehavior"] == "required"
+        assert metadata["rules.get"]["orgIdBehavior"] == "none"
 
-    def test_list_scans_invalid_type(self):
-        """Test list_scans with invalid scan type."""
-        result = list_scans(scan_type="InvalidType")
-        assert "Error" in result
+    def test_empty_manifest(self):
+        tools, metadata = server._build_tools({"version": 1, "tools": []})
+        assert tools == []
+        assert metadata == {}
 
 
-class TestRepositoryTools:
-    """Tests for repository tools."""
+class TestApplyOrgId:
+    def test_inject_if_missing_adds_org_id(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_test"
 
-    def test_list_repositories_default(self):
-        """Test list_repositories with default parameters."""
-        result = list_repositories()
-        assert result is not None
-        assert isinstance(result, str)
-        # Should return repositories or "No repositories found"
-        assert "repository" in result.lower() or "repo" in result.lower() or "error" in result.lower()
+    def test_inject_if_missing_preserves_existing(self):
+        args = {"organizationId": "org_custom", "page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_custom"
 
-    def test_list_repositories_with_search(self):
-        """Test list_repositories with search query."""
-        result = list_repositories(search_query="test")
-        assert result is not None
+    def test_required_injects_from_config(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_test"
 
+    def test_required_fails_when_config_empty(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id="")
+        assert error == "organizationId is required"
 
-class TestStatsTools:
-    """Tests for stats and analytics tools."""
-
-    def test_get_security_posture(self):
-        """Test get_security_posture."""
-        result = get_security_posture()
-        assert result is not None
-        assert isinstance(result, str)
-
-    def test_get_issues_by_vuln_class(self):
-        """Test get_issues_by_vuln_class."""
-        result = get_issues_by_vuln_class()
-        assert result is not None
-        assert isinstance(result, str)
-
-    def test_get_summary_statistics(self):
-        """Test get_summary_statistics."""
-        result = get_summary_statistics()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_none_skips_injection(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "none", organization_id="org_test")
+        assert error is None
+        assert "organizationId" not in args
 
 
-class TestSCATools:
-    """Tests for SCA (Software Composition Analysis) tools."""
+class DummyResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
 
-    def test_list_sca_vulnerabilities_default(self):
-        """Test list_sca_vulnerabilities with default parameters."""
-        result = list_sca_vulnerabilities()
-        assert result is not None
-        assert isinstance(result, str)
-
-    def test_list_sca_vulnerabilities_with_pagination(self):
-        """Test list_sca_vulnerabilities with pagination."""
-        result = list_sca_vulnerabilities(page=1, page_size=10)
-        assert result is not None
-
-    def test_list_sca_vulnerabilities_invalid_transitivity(self):
-        """Test list_sca_vulnerabilities with invalid transitivity."""
-        result = list_sca_vulnerabilities(transitivity="invalid")
-        assert "Error" in result
-
-    def test_get_sca_vulnerability_missing_id(self):
-        """Test get_sca_vulnerability with missing ID."""
-        result = get_sca_vulnerability("")
-        assert "Error" in result
-
-    def test_list_sca_repositories(self):
-        """Test list_sca_repositories."""
-        result = list_sca_repositories()
-        assert result is not None
-        assert isinstance(result, str)
+    def json(self):
+        return self._payload
 
 
-class TestIntegration:
-    """Integration tests that test tool workflows."""
+class TestTrpcClient:
+    def test_trpc_request_builds_url_and_headers(self, monkeypatch):
+        captured = {}
 
-    def test_search_and_get_issue_workflow(self):
-        """Test searching for issues and then getting details."""
-        # First search for vulnerabilities
-        search_result = search_vulnerabilities()
-        assert search_result is not None
+        def fake_get(url, headers=None, params=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["params"] = params
+            return DummyResponse({"result": {"data": {"ok": True}}})
 
-        # If we found issues, try to get the first one
-        if "ID:" in search_result and "Error" not in search_result:
-            # Extract first issue ID (basic parsing)
-            lines = search_result.split("\n")
-            for line in lines:
-                if line.startswith("ID:"):
-                    issue_id = line.replace("ID:", "").strip()
-                    if issue_id and issue_id != "N/A":
-                        # Get issue details
-                        issue_result = get_issue(issue_id)
-                        assert issue_result is not None
-                        break
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
 
-    def test_list_repos_and_scan_workflow(self):
-        """Test listing repos and checking scans."""
-        # List repositories
-        repos_result = list_repositories()
-        assert repos_result is not None
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "v2.issues.list",
+            {"organizationId": "org_test"},
+            procedure_type="query",
+        )
 
-        # List recent scans
-        scans_result = list_scans()
-        assert scans_result is not None
+        assert result == {"ok": True}
+        assert captured["url"] == "https://example.com/trpc/v2.issues.list"
+        assert captured["headers"]["X-ZeroPath-API-Token-Id"] == "test-token-id"
+        assert captured["headers"]["X-ZeroPath-API-Token-Secret"] == "test-token-secret"
+        assert captured["headers"]["X-ZeroPath-Client"] == "zeropath-mcp-server"
+        assert json.loads(captured["params"]["input"])["organizationId"] == "org_test"
+
+    def test_trpc_error_passthrough(self, monkeypatch):
+        def fake_get(url, headers=None, params=None, timeout=None):
+            return DummyResponse({"error": {"message": "Unauthorized", "code": "UNAUTHORIZED"}}, status_code=401)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "v2.repositories.list",
+            {},
+            procedure_type="query",
+        )
+        assert result == {"error": {"message": "Unauthorized", "code": "UNAUTHORIZED"}}
+
+    def test_trpc_mutation_sends_raw_json_body(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return DummyResponse({"result": {"data": {"ok": True}}})
+
+        monkeypatch.setattr(trpc_client.requests, "post", fake_post)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "v2.issues.archive",
+            {"issueIds": ["issue_1"], "reason": "test"},
+            procedure_type="mutation",
+        )
+
+        assert result == {"ok": True}
+        assert captured["url"] == "https://example.com/trpc/v2.issues.archive"
+        assert captured["json"] == {"issueIds": ["issue_1"], "reason": "test"}
 
 
-# Quick smoke test that can be run independently
-def test_smoke():
-    """Quick smoke test to verify basic connectivity."""
-    # Just test that we can call a simple read-only endpoint
-    result = list_repositories()
-    assert result is not None
-    print(f"\nSmoke test result:\n{result[:500]}...")
+class TestFetchManifest:
+    def test_successful_fetch(self, monkeypatch):
+        def fake_get(url, timeout=None):
+            return DummyResponse(SAMPLE_MANIFEST)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.fetch_manifest()
+        assert result["version"] == 1
+        assert len(result["tools"]) == 3
+
+    def test_rejects_bad_version(self, monkeypatch):
+        def fake_get(url, timeout=None):
+            return DummyResponse({"version": 99, "tools": []})
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="Unsupported manifest version"):
+            client.fetch_manifest()
+
+    def test_rejects_http_error(self, monkeypatch):
+        def fake_get(url, timeout=None):
+            return DummyResponse("Not Found", status_code=404)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            client.fetch_manifest()
 
 
-if __name__ == "__main__":
-    # Run smoke test directly
-    print("Running smoke test...")
-    test_smoke()
-    print("\nSmoke test passed!")
-    print("\nTo run all tests: uv run pytest tests/test_tools.py -v")
+class TestCallTool:
+    """Test the call_tool handler via create_server()."""
+
+    @pytest.fixture
+    def mock_server(self, monkeypatch):
+        """Create a server with a mocked manifest fetch."""
+        def fake_get(url, timeout=None):
+            return DummyResponse(SAMPLE_MANIFEST)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        return server.create_server()
+
+    def test_unknown_tool_returns_error(self, mock_server):
+        import asyncio
+        import mcp.types as types
+
+        handler = mock_server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="no.such.tool", arguments=None),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        assert len(result.root.content) == 1
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "NOT_FOUND"
+
+    def test_schema_validation_failure_returns_bad_request(self, mock_server):
+        import asyncio
+        import mcp.types as types
+
+        handler = mock_server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="rules.get", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "BAD_REQUEST"
+        assert payload["error"]["message"] == "Input validation failed"
+
+    def test_build_tools_roundtrip(self, monkeypatch):
+        """Verify _build_tools produces correct Tool objects."""
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST)
+
+        # All tools are present
+        names = [t.name for t in tools]
+        assert "issues.list" in names
+        assert "stats.assets" in names
+        assert "rules.get" in names
+
+        # Metadata is correct
+        assert metadata["issues.list"]["trpcProcedure"] == "v2.issues.list"
+        assert metadata["stats.assets"]["trpcProcedure"] == "v2.stats.assets"

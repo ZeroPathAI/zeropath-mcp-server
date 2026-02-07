@@ -76,3 +76,5 @@ Thumbs.db
 # Project specific
 cursor_config.json
 dev_mode.bash
+__pycache__/
+*.pyc
