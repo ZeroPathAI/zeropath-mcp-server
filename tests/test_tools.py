@@ -18,6 +18,7 @@ import pytest
 
 import zeropath_mcp_server.trpc_client as trpc_client
 from zeropath_mcp_server import server
+from zeropath_mcp_server.jsonschema_validation import validate as validate_jsonschema
 
 
 SAMPLE_MANIFEST = {
@@ -69,6 +70,30 @@ SAMPLE_MANIFEST = {
     ],
 }
 
+REF_ROOT_MANIFEST = {
+    "version": 1,
+    "definitions": {
+        "IssuesListInput": {
+            "type": "object",
+            "properties": {
+                "organizationId": {"type": "string"},
+                "page": {"type": "integer"},
+            },
+            "required": ["page"],
+        }
+    },
+    "tools": [
+        {
+            "name": "issues.list",
+            "trpcProcedure": "v2.issues.list",
+            "procedureType": "query",
+            "description": "List security issues",
+            "inputSchema": {"$ref": "#/definitions/IssuesListInput"},
+            "orgIdBehavior": "inject-if-missing",
+        }
+    ],
+}
+
 
 class TestBuildTools:
     def test_parses_tools_from_manifest(self):
@@ -91,6 +116,20 @@ class TestBuildTools:
         tools, metadata = server._build_tools({"version": 1, "tools": []})
         assert tools == []
         assert metadata == {}
+
+    def test_build_tools_supports_ref_to_root_definitions(self):
+        tools, metadata = server._build_tools(REF_ROOT_MANIFEST)
+        assert tools[0].name == "issues.list"
+        assert metadata["issues.list"]["procedureType"] == "query"
+
+
+class TestJsonschemaValidation:
+    def test_ref_resolution_uses_root_schema_when_provided(self):
+        # Without root_schema, "$ref" cannot resolve because the per-tool schema
+        # doesn't contain the shared definitions.
+        schema = {"$ref": "#/definitions/IssuesListInput"}
+        issues = validate_jsonschema({"organizationId": "org_test"}, schema, root_schema=REF_ROOT_MANIFEST)
+        assert any(i.path == "page" and "Missing required" in i.message for i in issues)
 
 
 class TestApplyOrgId:

@@ -82,9 +82,18 @@ def _type_matches(value: Any, typ: str) -> bool:
     raise UnsupportedSchemaError(f"Unsupported JSON Schema type {typ!r}")
 
 
-def validate(instance: Any, schema: JsonObject) -> list[ValidationIssue]:
+def validate(
+    instance: Any,
+    schema: JsonObject,
+    *,
+    root_schema: Any | None = None,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    _validate(instance, schema, path="", issues=issues, root_schema=schema, ref_stack=set())
+    # $ref is resolved relative to the root schema. When validating a tool's
+    # per-procedure schema, callers may provide a broader root (e.g. the full
+    # manifest) so shared definitions can be referenced.
+    resolved_root = root_schema if root_schema is not None else schema
+    _validate(instance, schema, path="", issues=issues, root_schema=resolved_root, ref_stack=set())
     return issues
 
 
@@ -293,4 +302,3 @@ def _validate(
             issues.append(ValidationIssue(path, f"Expected > {exclusive_minimum}"))
         if exclusive_maximum is not None and instance >= exclusive_maximum:
             issues.append(ValidationIssue(path, f"Expected < {exclusive_maximum}"))
-

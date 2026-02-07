@@ -185,7 +185,7 @@ def create_server() -> Server:
             raise RuntimeError(json.dumps({"error": {"code": "BAD_REQUEST", "message": error}}))
 
         try:
-            issues = validate_jsonschema(args, meta["inputSchema"])
+            issues = validate_jsonschema(args, meta["inputSchema"], root_schema=manifest)
         except UnsupportedSchemaError as exc:
             # Best-effort validation: don't reject calls due to missing client support
             # for a schema feature; the server-side Zod schema remains authoritative.
