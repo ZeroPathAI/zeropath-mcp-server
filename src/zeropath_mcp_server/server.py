@@ -3,7 +3,7 @@ ZeroPath MCP Server
 
 Fetches the tool manifest from the ZeroPath frontend at startup and
 dynamically registers MCP tools. All input validation is delegated to
-tRPC's server-side Zod schemas — the manifest's JSON Schemas are used
+the server-side Zod schemas — the manifest's JSON Schemas are used
 for tool advertisement and best-effort client-side validation. If a tool
 schema uses JSON Schema features this client does not support, the server
 will skip client-side validation for that request rather than validating
@@ -28,7 +28,6 @@ JsonObject = dict[str, Any]
 _CLIENT: TrpcClient | None = None
 
 _ALLOWED_ORG_ID_BEHAVIORS = {"inject-if-missing", "required", "none"}
-_ALLOWED_PROCEDURE_TYPES = {"query", "mutation"}
 
 
 def _get_client() -> TrpcClient:
@@ -75,15 +74,15 @@ def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str)
 def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, JsonObject]]:
     """Parse the manifest into MCP Tool objects and a metadata lookup.
 
-    Returns (tools, metadata) where metadata maps tool name ->
-    {"trpcProcedure": str, "procedureType": "query"|"mutation", "orgIdBehavior": str}.
+    Supports manifest v2 only (httpMethod/httpPath). The metadata lookup
+    includes keys: httpMethod, httpPath, orgIdBehavior, inputSchema.
     """
     if not isinstance(manifest, dict):
         raise RuntimeError("Invalid MCP manifest: top-level must be an object")
 
     version = manifest.get("version")
-    if version != 1:
-        raise RuntimeError(f"Invalid MCP manifest: unsupported version {version!r}")
+    if version != 2:
+        raise RuntimeError(f"Invalid MCP manifest: unsupported version {version!r} (expected 2)")
 
     raw_tools = manifest.get("tools")
     if not isinstance(raw_tools, list):
@@ -100,19 +99,6 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
         if not isinstance(name, str) or not name.strip():
             raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].name must be a non-empty string")
 
-        trpc_procedure = entry.get("trpcProcedure")
-        if not isinstance(trpc_procedure, str) or not trpc_procedure.strip():
-            raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].trpcProcedure must be a non-empty string"
-            )
-
-        procedure_type = entry.get("procedureType")
-        if not isinstance(procedure_type, str) or procedure_type not in _ALLOWED_PROCEDURE_TYPES:
-            raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].procedureType must be one of "
-                f"{sorted(_ALLOWED_PROCEDURE_TYPES)}"
-            )
-
         input_schema = entry.get("inputSchema")
         if not isinstance(input_schema, dict):
             raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].inputSchema must be an object")
@@ -128,8 +114,28 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
                 f"{sorted(_ALLOWED_ORG_ID_BEHAVIORS)}"
             )
 
+        http_method = entry.get("httpMethod")
+        if not isinstance(http_method, str) or not http_method.strip():
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].httpMethod must be a non-empty string"
+            )
+        http_method = http_method.upper()
+        if http_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].httpMethod must be a valid HTTP method"
+            )
+
+        http_path = entry.get("httpPath")
+        if not isinstance(http_path, str) or not http_path.strip():
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].httpPath must be a non-empty string"
+            )
+        if not http_path.startswith("/api/v2/"):
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].httpPath must start with '/api/v2/' (got {http_path!r})"
+            )
+
         if org_id_behavior != "none" and not _schema_mentions_property(input_schema, "organizationId"):
-            # Don't hard-fail: org ID may be introduced via composition, $ref, etc.
             print(
                 f"Warning: tool {name!r} has orgIdBehavior={org_id_behavior!r} but inputSchema "
                 f"does not appear to mention organizationId",
@@ -147,8 +153,8 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
             )
         )
         metadata[name] = {
-            "trpcProcedure": trpc_procedure,
-            "procedureType": procedure_type,
+            "httpMethod": http_method,
+            "httpPath": http_path,
             "orgIdBehavior": org_id_behavior,
             "inputSchema": input_schema,
         }
@@ -210,9 +216,9 @@ def create_server() -> Server:
 
         result = await asyncio.to_thread(
             client.call,
-            meta["trpcProcedure"],
+            meta["httpPath"],
             args,
-            procedure_type=meta["procedureType"],
+            http_method=meta["httpMethod"],
         )
         if isinstance(result, dict) and "error" in result:
             raise RuntimeError(json.dumps(result))

@@ -21,14 +21,14 @@ from zeropath_mcp_server import server
 from zeropath_mcp_server.jsonschema_validation import validate as validate_jsonschema
 
 
-SAMPLE_MANIFEST = {
-    "version": 1,
+SAMPLE_MANIFEST_V2 = {
+    "version": 2,
     "generatedAt": "2026-01-01T00:00:00.000Z",
     "tools": [
         {
             "name": "issues.list",
-            "trpcProcedure": "v2.issues.list",
-            "procedureType": "query",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/issues/search",
             "description": "List security issues",
             "inputSchema": {
                 "type": "object",
@@ -41,8 +41,8 @@ SAMPLE_MANIFEST = {
         },
         {
             "name": "stats.assets",
-            "trpcProcedure": "v2.stats.assets",
-            "procedureType": "query",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/stats/assets",
             "description": "Get asset stats",
             "inputSchema": {
                 "type": "object",
@@ -55,8 +55,8 @@ SAMPLE_MANIFEST = {
         },
         {
             "name": "rules.get",
-            "trpcProcedure": "v2.rules.get",
-            "procedureType": "query",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/rules/get",
             "description": "Get a rule",
             "inputSchema": {
                 "type": "object",
@@ -70,8 +70,7 @@ SAMPLE_MANIFEST = {
     ],
 }
 
-REF_ROOT_MANIFEST = {
-    "version": 1,
+REF_ROOT_SCHEMA = {
     "definitions": {
         "IssuesListInput": {
             "type": "object",
@@ -81,54 +80,46 @@ REF_ROOT_MANIFEST = {
             },
             "required": ["page"],
         }
-    },
-    "tools": [
-        {
-            "name": "issues.list",
-            "trpcProcedure": "v2.issues.list",
-            "procedureType": "query",
-            "description": "List security issues",
-            "inputSchema": {"$ref": "#/definitions/IssuesListInput"},
-            "orgIdBehavior": "inject-if-missing",
-        }
-    ],
+    }
 }
 
-
 class TestBuildTools:
+    """Test _build_tools with v2 manifest format."""
+
+    def test_rejects_v1(self):
+        with pytest.raises(RuntimeError, match="expected 2"):
+            server._build_tools({"version": 1, "tools": []})
+
     def test_parses_tools_from_manifest(self):
-        tools, metadata = server._build_tools(SAMPLE_MANIFEST)
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
         assert len(tools) == 3
         assert tools[0].name == "issues.list"
         assert tools[0].description == "List security issues"
-        assert tools[0].inputSchema["type"] == "object"
 
-    def test_builds_metadata_lookup(self):
-        _, metadata = server._build_tools(SAMPLE_MANIFEST)
+    def test_preserves_http_metadata(self):
+        _, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-        assert metadata["issues.list"]["trpcProcedure"] == "v2.issues.list"
+        assert metadata["issues.list"]["httpMethod"] == "POST"
+        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
         assert metadata["issues.list"]["orgIdBehavior"] == "inject-if-missing"
-        assert metadata["stats.assets"]["orgIdBehavior"] == "required"
-        assert metadata["rules.get"]["orgIdBehavior"] == "none"
+
+        assert metadata["stats.assets"]["httpMethod"] == "POST"
+        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"
+
+        assert metadata["rules.get"]["httpMethod"] == "POST"
+        assert metadata["rules.get"]["httpPath"] == "/api/v2/rules/get"
 
     def test_empty_manifest(self):
-        tools, metadata = server._build_tools({"version": 1, "tools": []})
+        tools, metadata = server._build_tools({"version": 2, "tools": []})
         assert tools == []
         assert metadata == {}
-
-    def test_build_tools_supports_ref_to_root_definitions(self):
-        tools, metadata = server._build_tools(REF_ROOT_MANIFEST)
-        assert tools[0].name == "issues.list"
-        assert metadata["issues.list"]["procedureType"] == "query"
 
 
 class TestJsonschemaValidation:
     def test_ref_resolution_uses_root_schema_when_provided(self):
-        # Without root_schema, "$ref" cannot resolve because the per-tool schema
-        # doesn't contain the shared definitions.
         schema = {"$ref": "#/definitions/IssuesListInput"}
-        issues = validate_jsonschema({"organizationId": "org_test"}, schema, root_schema=REF_ROOT_MANIFEST)
+        issues = validate_jsonschema({"organizationId": "org_test"}, schema, root_schema=REF_ROOT_SCHEMA)
         assert any(i.path == "page" and "Missing required" in i.message for i in issues)
 
 
@@ -173,80 +164,72 @@ class DummyResponse:
         return self._payload
 
 
-class TestTrpcClient:
-    def test_trpc_request_builds_url_and_headers(self, monkeypatch):
+class TestRestClient:
+    """Test TrpcClient calling REST endpoints (v2 manifest pattern)."""
+
+    def test_rest_post_builds_url_and_headers(self, monkeypatch):
         captured = {}
 
-        def fake_get(url, headers=None, params=None, timeout=None):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["params"] = params
-            return DummyResponse({"result": {"data": {"ok": True}}})
-
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
-
-        client = trpc_client.TrpcClient(trpc_client.load_config())
-        result = client.call(
-            "v2.issues.list",
-            {"organizationId": "org_test"},
-            procedure_type="query",
-        )
-
-        assert result == {"ok": True}
-        assert captured["url"] == "https://example.com/trpc/v2.issues.list"
-        assert captured["headers"]["X-ZeroPath-API-Token-Id"] == "test-token-id"
-        assert captured["headers"]["X-ZeroPath-API-Token-Secret"] == "test-token-secret"
-        assert captured["headers"]["X-ZeroPath-Client"] == "zeropath-mcp-server"
-        assert json.loads(captured["params"]["input"])["organizationId"] == "org_test"
-
-    def test_trpc_error_passthrough(self, monkeypatch):
-        def fake_get(url, headers=None, params=None, timeout=None):
-            return DummyResponse({"error": {"message": "Unauthorized", "code": "UNAUTHORIZED"}}, status_code=401)
-
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
-
-        client = trpc_client.TrpcClient(trpc_client.load_config())
-        result = client.call(
-            "v2.repositories.list",
-            {},
-            procedure_type="query",
-        )
-        assert result == {"error": {"message": "Unauthorized", "code": "UNAUTHORIZED"}}
-
-    def test_trpc_mutation_sends_raw_json_body(self, monkeypatch):
-        captured = {}
-
-        def fake_post(url, headers=None, json=None, timeout=None):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["method"] = method
             captured["url"] = url
             captured["headers"] = headers
             captured["json"] = json
-            return DummyResponse({"result": {"data": {"ok": True}}})
+            return DummyResponse({"issues": [], "totalCount": 0})
 
-        monkeypatch.setattr(trpc_client.requests, "post", fake_post)
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.call(
-            "v2.issues.archive",
-            {"issueIds": ["issue_1"], "reason": "test"},
-            procedure_type="mutation",
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
         )
 
-        assert result == {"ok": True}
-        assert captured["url"] == "https://example.com/trpc/v2.issues.archive"
-        assert captured["json"] == {"issueIds": ["issue_1"], "reason": "test"}
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["method"] == "POST"
+        assert captured["url"] == "https://example.com/api/v2/issues/search"
+        assert captured["headers"]["X-ZeroPath-API-Token-Id"] == "test-token-id"
+        assert captured["headers"]["X-ZeroPath-API-Token-Secret"] == "test-token-secret"
+        assert captured["headers"]["X-ZeroPath-Client"] == "zeropath-mcp-server"
+        assert captured["json"]["organizationId"] == "org_test"
 
+    def test_rest_error_returns_error_dict(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse({"error": "Unauthorized"}, status_code=401)
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/repositories/list",
+            {},
+            http_method="POST",
+        )
+        assert "error" in result
+        assert result["error"]["code"] == "API_ERROR"
 
 class TestFetchManifest:
-    def test_successful_fetch(self, monkeypatch):
+    def test_successful_fetch_v2(self, monkeypatch):
         def fake_get(url, timeout=None):
-            return DummyResponse(SAMPLE_MANIFEST)
+            return DummyResponse(SAMPLE_MANIFEST_V2)
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.fetch_manifest()
-        assert result["version"] == 1
+        assert result["version"] == 2
         assert len(result["tools"]) == 3
+
+    def test_rejects_v1(self, monkeypatch):
+        def fake_get(url, timeout=None):
+            return DummyResponse({"version": 1, "tools": []})
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="Unsupported manifest version"):
+            client.fetch_manifest()
 
     def test_rejects_bad_version(self, monkeypatch):
         def fake_get(url, timeout=None):
@@ -273,19 +256,24 @@ class TestCallTool:
     """Test the call_tool handler via create_server()."""
 
     @pytest.fixture
-    def mock_server(self, monkeypatch):
-        """Create a server with a mocked manifest fetch."""
+    def mock_server_v2(self, monkeypatch):
+        """Create a server with a mocked v2 manifest fetch."""
         def fake_get(url, timeout=None):
-            return DummyResponse(SAMPLE_MANIFEST)
+            return DummyResponse(SAMPLE_MANIFEST_V2)
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
-        return server.create_server()
 
-    def test_unknown_tool_returns_error(self, mock_server):
+        # Reset cached client so each test gets a fresh server
+        server._CLIENT = None
+        srv = server.create_server()
+        yield srv
+        server._CLIENT = None
+
+    def test_unknown_tool_returns_error(self, mock_server_v2):
         import asyncio
         import mcp.types as types
 
-        handler = mock_server.request_handlers[types.CallToolRequest]
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
             method="tools/call",
             params=types.CallToolRequestParams(name="no.such.tool", arguments=None),
@@ -297,11 +285,11 @@ class TestCallTool:
         payload = json.loads(result.root.content[0].text)
         assert payload["error"]["code"] == "NOT_FOUND"
 
-    def test_schema_validation_failure_returns_bad_request(self, mock_server):
+    def test_schema_validation_failure_returns_bad_request(self, mock_server_v2):
         import asyncio
         import mcp.types as types
 
-        handler = mock_server.request_handlers[types.CallToolRequest]
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
             method="tools/call",
             params=types.CallToolRequestParams(name="rules.get", arguments={}),
@@ -313,16 +301,15 @@ class TestCallTool:
         assert payload["error"]["code"] == "BAD_REQUEST"
         assert payload["error"]["message"] == "Input validation failed"
 
-    def test_build_tools_roundtrip(self, monkeypatch):
-        """Verify _build_tools produces correct Tool objects."""
-        tools, metadata = server._build_tools(SAMPLE_MANIFEST)
+    def test_build_tools_v2_roundtrip(self):
+        """Verify _build_tools produces correct Tool objects for v2."""
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-        # All tools are present
         names = [t.name for t in tools]
         assert "issues.list" in names
         assert "stats.assets" in names
         assert "rules.get" in names
 
-        # Metadata is correct
-        assert metadata["issues.list"]["trpcProcedure"] == "v2.issues.list"
-        assert metadata["stats.assets"]["trpcProcedure"] == "v2.stats.assets"
+        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues.list"]["httpMethod"] == "POST"
+        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"

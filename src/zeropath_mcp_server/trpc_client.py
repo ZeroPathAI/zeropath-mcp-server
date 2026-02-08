@@ -1,21 +1,20 @@
 """
-Helpers for calling ZeroPath tRPC V2 procedures.
+Helpers for calling ZeroPath V2 REST API endpoints.
+
+Despite the module name (kept for import compatibility), this client calls
+the stable `/api/v2/` REST surface.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, TypeAlias
+from typing import Any, Mapping
 import os
-import json as _json
-
 import requests
 
 JsonObject = dict[str, Any]
 
 DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
-
-ProcedureType: TypeAlias = Literal["query", "mutation"]
 
 
 @dataclass(frozen=True)
@@ -81,14 +80,25 @@ class TrpcClient:
     def organization_id(self) -> str:
         return self._config.organization_id
 
-    def call(self, procedure: str, payload: Mapping[str, Any], *, procedure_type: ProcedureType) -> JsonObject:
-        """Call a tRPC procedure using tRPC v10 HTTP conventions.
+    def call(
+        self,
+        http_path: str,
+        payload: Mapping[str, Any],
+        *,
+        http_method: str = "POST",
+    ) -> JsonObject:
+        """Call a ZeroPath REST API endpoint.
 
-        Based on the frontend's `tests/smoke/helpers/trpc.ts`:
-        - queries: GET /trpc/<procedure>?input=<url-encoded JSON>
-        - mutations: POST /trpc/<procedure> with raw JSON body (NOT wrapped in {"json": ...})
+        V2 endpoints are called directly and the response JSON is returned.
         """
-        url = f"{self._config.base_url}/trpc/{procedure}"
+        method = http_method.upper()
+        if method == "GET" and payload:
+            return make_error(
+                "BAD_REQUEST",
+                "GET endpoints do not support request bodies in this client; use POST or send an empty payload",
+            )
+
+        url = f"{self._config.base_url}{http_path}"
         headers = {
             "X-ZeroPath-API-Token-Id": self._config.token_id,
             "X-ZeroPath-API-Token-Secret": self._config.token_secret,
@@ -97,30 +107,17 @@ class TrpcClient:
         }
 
         try:
-            if procedure_type == "query":
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    params={"input": _json.dumps(dict(payload))},
-                    timeout=DEFAULT_TIMEOUT_SECONDS,
-                )
-            elif procedure_type == "mutation":
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=dict(payload),
-                    timeout=DEFAULT_TIMEOUT_SECONDS,
-                )
-            else:
-                return make_error(
-                    "BAD_REQUEST",
-                    "Unsupported tRPC procedure type",
-                    data={"procedureType": procedure_type},
-                )
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=dict(payload) if method != "GET" else None,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+            )
         except requests.RequestException as exc:
             return make_error(
                 "NETWORK_ERROR",
-                "Failed to reach ZeroPath tRPC endpoint",
+                f"Failed to reach ZeroPath API endpoint {http_path}",
                 data={"detail": str(exc)},
             )
 
@@ -134,23 +131,20 @@ class TrpcClient:
                 http_status=response.status_code,
             )
 
-        if isinstance(response_json, dict) and "error" in response_json:
-            return {"error": response_json["error"]}
+        # REST handlers return errors as {"error": "message"} with non-200 status
+        if response.status_code >= 400:
+            error_message = (
+                response_json.get("error", "Unknown error")
+                if isinstance(response_json, dict)
+                else str(response_json)
+            )
+            return make_error(
+                "API_ERROR",
+                error_message,
+                http_status=response.status_code,
+            )
 
-        if (
-            isinstance(response_json, dict)
-            and "result" in response_json
-            and isinstance(response_json["result"], dict)
-            and "data" in response_json["result"]
-        ):
-            return response_json["result"]["data"]
-
-        return make_error(
-            "BAD_RESPONSE",
-            "ZeroPath returned an unexpected tRPC payload",
-            data={"body": response_json},
-            http_status=response.status_code,
-        )
+        return response_json
 
     def fetch_manifest(self) -> JsonObject:
         """Fetch the MCP tool manifest from the frontend."""
@@ -175,9 +169,9 @@ class TrpcClient:
                 f"MCP manifest returned non-JSON response: {response.text[:200]}"
             ) from exc
 
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict) or data.get("version") != 2:
             raise RuntimeError(
-                f"Unsupported manifest version: {data.get('version') if isinstance(data, dict) else 'unknown'}"
+                f"Unsupported manifest version: {data.get('version') if isinstance(data, dict) else 'unknown'} (expected 2)"
             )
 
         return data
