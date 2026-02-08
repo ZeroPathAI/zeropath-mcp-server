@@ -142,10 +142,22 @@ class TestApplyOrgId:
         assert error is None
         assert args["organizationId"] == "org_test"
 
-    def test_required_fails_when_config_empty(self):
+    def test_required_succeeds_when_config_empty(self):
         args = {}
         error = server._apply_org_id(args, "required", organization_id="")
-        assert error == "organizationId is required"
+        assert error is None
+
+    def test_inject_if_missing_skips_when_org_id_none(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id=None)
+        assert error is None
+        assert "organizationId" not in args
+
+    def test_required_succeeds_when_org_id_none(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id=None)
+        assert error is None
+        assert "organizationId" not in args
 
     def test_none_skips_injection(self):
         args = {"page": 1}

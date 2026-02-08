@@ -22,7 +22,7 @@ class ZeropathConfig:
     base_url: str
     token_id: str
     token_secret: str
-    organization_id: str
+    organization_id: str | None
 
 
 def load_config() -> ZeropathConfig:
@@ -36,7 +36,6 @@ def load_config() -> ZeropathConfig:
         for name, value in (
             ("ZEROPATH_TOKEN_ID", token_id),
             ("ZEROPATH_TOKEN_SECRET", token_secret),
-            ("ZEROPATH_ORG_ID", organization_id),
         )
         if not value
     ]
@@ -77,7 +76,7 @@ class TrpcClient:
         self._config = config
 
     @property
-    def organization_id(self) -> str:
+    def organization_id(self) -> str | None:
         return self._config.organization_id
 
     def call(

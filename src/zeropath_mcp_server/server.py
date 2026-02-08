@@ -53,20 +53,19 @@ def _schema_mentions_property(schema: Any, prop: str) -> bool:
     return False
 
 
-def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str) -> str | None:
+def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str | None) -> str | None:
     """Inject organizationId from config when appropriate.
 
-    Returns an error message string if org ID is required but missing,
-    otherwise returns None (success).
+    When *organization_id* is None (ZEROPATH_ORG_ID not configured), injection
+    is skipped and server-side resolution is expected to handle it.
+
+    Returns an error message string on failure, otherwise None (success).
     """
     if behavior == "none":
         return None
 
-    if not arguments.get("organizationId"):
+    if not arguments.get("organizationId") and organization_id is not None:
         arguments["organizationId"] = organization_id
-
-    if behavior == "required" and not arguments.get("organizationId"):
-        return "organizationId is required"
 
     return None
 
