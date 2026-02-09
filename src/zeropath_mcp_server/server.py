@@ -64,8 +64,15 @@ def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str 
     if behavior == "none":
         return None
 
-    if not arguments.get("organizationId") and organization_id is not None:
-        arguments["organizationId"] = organization_id
+    if not arguments.get("organizationId"):
+        # Only inject non-empty values. Treat empty string as "not configured".
+        if organization_id:
+            arguments["organizationId"] = organization_id
+        elif behavior == "required":
+            return (
+                "organizationId is required for this operation. "
+                "Pass organizationId explicitly or set ZEROPATH_ORG_ID."
+            )
 
     return None
 
