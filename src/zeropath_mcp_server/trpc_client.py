@@ -85,10 +85,13 @@ class TrpcClient:
         payload: Mapping[str, Any],
         *,
         http_method: str = "POST",
+        token_id: str | None = None,
+        token_secret: str | None = None,
     ) -> JsonObject:
         """Call a ZeroPath REST API endpoint.
 
         V2 endpoints are called directly and the response JSON is returned.
+        Per-request token_id/token_secret override the env-level defaults.
         """
         method = http_method.upper()
         if method == "GET" and payload:
@@ -97,10 +100,14 @@ class TrpcClient:
                 "GET endpoints do not support request bodies in this client; use POST or send an empty payload",
             )
 
+        # Per-request tokens (from the logged-in user) take priority over env defaults
+        effective_id = token_id or self._config.token_id
+        effective_secret = token_secret or self._config.token_secret
+
         url = f"{self._config.base_url}{http_path}"
         headers = {
-            "X-ZeroPath-API-Token-Id": self._config.token_id,
-            "X-ZeroPath-API-Token-Secret": self._config.token_secret,
+            "X-ZeroPath-API-Token-Id": effective_id,
+            "X-ZeroPath-API-Token-Secret": effective_secret,
             "X-ZeroPath-Client": CLIENT_HEADER_VALUE,
             "Content-Type": "application/json",
         }

@@ -197,6 +197,10 @@ def create_server() -> Server:
         meta = metadata[name]
         args = dict(arguments or {})
 
+        # Extract per-request API token credentials injected by the chatkit-server wrapper
+        token_id: str | None = args.pop("_token_id", None) or None
+        token_secret: str | None = args.pop("_token_secret", None) or None
+
         error = _apply_org_id(args, meta["orgIdBehavior"], organization_id=client.organization_id)
         if error:
             raise RuntimeError(json.dumps({"error": {"code": "BAD_REQUEST", "message": error}}))
@@ -230,6 +234,8 @@ def create_server() -> Server:
             meta["httpPath"],
             args,
             http_method=meta["httpMethod"],
+            token_id=token_id,
+            token_secret=token_secret,
         )
         if isinstance(result, dict) and "error" in result:
             raise RuntimeError(json.dumps(result))
