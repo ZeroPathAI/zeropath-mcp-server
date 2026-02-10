@@ -26,24 +26,10 @@ class ZeropathConfig:
 
 
 def load_config() -> ZeropathConfig:
-    token_id = os.getenv("ZEROPATH_TOKEN_ID")
-    token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
+    token_id = os.getenv("ZEROPATH_TOKEN_ID", "")
+    token_secret = os.getenv("ZEROPATH_TOKEN_SECRET", "")
     organization_id = os.getenv("ZEROPATH_ORG_ID")
     base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com")
-
-    missing = [
-        name
-        for name, value in (
-            ("ZEROPATH_TOKEN_ID", token_id),
-            ("ZEROPATH_TOKEN_SECRET", token_secret),
-        )
-        if not value
-    ]
-
-    if missing:
-        raise EnvironmentError(
-            "Missing required environment variables: " + ", ".join(missing)
-        )
 
     return ZeropathConfig(
         base_url=base_url.rstrip("/"),
@@ -85,10 +71,14 @@ class TrpcClient:
         payload: Mapping[str, Any],
         *,
         http_method: str = "POST",
+        cookies: str | None = None,
     ) -> JsonObject:
         """Call a ZeroPath REST API endpoint.
 
-        V2 endpoints are called directly and the response JSON is returned.
+        When *cookies* is provided (a raw Cookie header string from the user's
+        browser session), the request authenticates via session cookies instead
+        of API token headers.  This allows the chatkit agent to act on behalf
+        of the logged-in user.
         """
         method = http_method.upper()
         if method == "GET" and payload:
@@ -98,12 +88,18 @@ class TrpcClient:
             )
 
         url = f"{self._config.base_url}{http_path}"
-        headers = {
-            "X-ZeroPath-API-Token-Id": self._config.token_id,
-            "X-ZeroPath-API-Token-Secret": self._config.token_secret,
+        headers: dict[str, str] = {
             "X-ZeroPath-Client": CLIENT_HEADER_VALUE,
             "Content-Type": "application/json",
         }
+
+        if cookies:
+            # Authenticate as the logged-in user via session cookies.
+            headers["Cookie"] = cookies
+        else:
+            # Fall back to static API token auth.
+            headers["X-ZeroPath-API-Token-Id"] = self._config.token_id
+            headers["X-ZeroPath-API-Token-Secret"] = self._config.token_secret
 
         try:
             response = requests.request(
