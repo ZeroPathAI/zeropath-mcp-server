@@ -94,21 +94,21 @@ class TestBuildTools:
         tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
         assert len(tools) == 3
-        assert tools[0].name == "issues_list"
+        assert tools[0].name == "issues.list"
         assert tools[0].description == "List security issues"
 
     def test_preserves_http_metadata(self):
         _, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-        assert metadata["issues_list"]["httpMethod"] == "POST"
-        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
-        assert metadata["issues_list"]["orgIdBehavior"] == "inject-if-missing"
+        assert metadata["issues.list"]["httpMethod"] == "POST"
+        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues.list"]["orgIdBehavior"] == "inject-if-missing"
 
-        assert metadata["stats_assets"]["httpMethod"] == "POST"
-        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
+        assert metadata["stats.assets"]["httpMethod"] == "POST"
+        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"
 
-        assert metadata["rules_get"]["httpMethod"] == "POST"
-        assert metadata["rules_get"]["httpPath"] == "/api/v2/rules/get"
+        assert metadata["rules.get"]["httpMethod"] == "POST"
+        assert metadata["rules.get"]["httpPath"] == "/api/v2/rules/get"
 
     def test_empty_manifest(self):
         tools, metadata = server._build_tools({"version": 2, "tools": []})
@@ -214,28 +214,6 @@ class TestRestClient:
         assert captured["headers"]["X-ZeroPath-Client"] == "zeropath-mcp-server"
         assert captured["json"]["organizationId"] == "org_test"
 
-    def test_rest_post_with_cookies_uses_cookie_header(self, monkeypatch):
-        """When cookies are provided, use Cookie header instead of API tokens."""
-        captured = {}
-
-        def fake_request(method, url, headers=None, json=None, timeout=None):
-            captured["headers"] = headers
-            return DummyResponse({"issues": [], "totalCount": 0})
-
-        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
-
-        client = trpc_client.TrpcClient(trpc_client.load_config())
-        client.call(
-            "/api/v2/issues/search",
-            {"organizationId": "org_test"},
-            http_method="POST",
-            cookies="zp_session=%7B%22id%22%3A%22sess123%22%7D; zp_org=%7B%22id%22%3A%22org_abc%22%7D",
-        )
-
-        assert captured["headers"]["Cookie"].startswith("zp_session=")
-        assert "X-ZeroPath-API-Token-Id" not in captured["headers"]
-        assert "X-ZeroPath-API-Token-Secret" not in captured["headers"]
-
     def test_rest_error_returns_error_dict(self, monkeypatch):
         def fake_request(method, url, headers=None, json=None, timeout=None):
             return DummyResponse({"error": "Unauthorized"}, status_code=401)
@@ -334,29 +312,24 @@ class TestCallTool:
         handler = mock_server_v2.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
             method="tools/call",
-            params=types.CallToolRequestParams(name="rules_get", arguments={}),
+            params=types.CallToolRequestParams(name="rules.get", arguments={}),
         )
         result = asyncio.run(handler(req))
 
         assert result.root.isError is True
-        error_text = result.root.content[0].text
-        # The error may be JSON or a plain string depending on MCP library version.
-        try:
-            payload = json.loads(error_text)
-            assert payload["error"]["code"] == "BAD_REQUEST"
-            assert payload["error"]["message"] == "Input validation failed"
-        except json.JSONDecodeError:
-            assert "ruleId" in error_text and "required" in error_text
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "BAD_REQUEST"
+        assert payload["error"]["message"] == "Input validation failed"
 
     def test_build_tools_v2_roundtrip(self):
         """Verify _build_tools produces correct Tool objects for v2."""
         tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
         names = [t.name for t in tools]
-        assert "issues_list" in names
-        assert "stats_assets" in names
-        assert "rules_get" in names
+        assert "issues.list" in names
+        assert "stats.assets" in names
+        assert "rules.get" in names
 
-        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
-        assert metadata["issues_list"]["httpMethod"] == "POST"
-        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
+        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues.list"]["httpMethod"] == "POST"
+        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"

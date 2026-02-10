@@ -197,10 +197,6 @@ def create_server() -> Server:
         meta = metadata[name]
         args = dict(arguments or {})
 
-        # Extract the reserved _cookies field injected by CookieInjectingMCPServer.
-        # This is the user's raw Cookie header for session-based auth.
-        cookies: str | None = args.pop("_cookies", None) or None
-
         error = _apply_org_id(args, meta["orgIdBehavior"], organization_id=client.organization_id)
         if error:
             raise RuntimeError(json.dumps({"error": {"code": "BAD_REQUEST", "message": error}}))
@@ -234,7 +230,6 @@ def create_server() -> Server:
             meta["httpPath"],
             args,
             http_method=meta["httpMethod"],
-            cookies=cookies,
         )
         if isinstance(result, dict) and "error" in result:
             raise RuntimeError(json.dumps(result))
