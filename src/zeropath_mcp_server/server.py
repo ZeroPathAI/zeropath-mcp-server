@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from typing import Any
 
@@ -104,6 +105,10 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
             raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].name must be a non-empty string")
+
+        # OpenAI's API requires tool names to match ^[a-zA-Z0-9_-]+$.
+        # The manifest uses operationIds like "issues.list" which contain dots.
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
         input_schema = entry.get("inputSchema")
         if not isinstance(input_schema, dict):
