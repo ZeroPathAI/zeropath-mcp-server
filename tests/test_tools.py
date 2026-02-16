@@ -196,7 +196,7 @@ class TestRestClient:
             captured["json"] = json
             return DummyResponse({"issues": [], "totalCount": 0})
 
-        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.call(
@@ -217,7 +217,7 @@ class TestRestClient:
         def fake_request(method, url, headers=None, json=None, timeout=None):
             return DummyResponse({"error": "Unauthorized"}, status_code=401)
 
-        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.call(
@@ -234,7 +234,7 @@ class TestFetchManifest:
         def fake_get(url, timeout=None):
             return DummyResponse(SAMPLE_MANIFEST_V2)
 
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.fetch_manifest()
@@ -245,7 +245,7 @@ class TestFetchManifest:
         def fake_get(url, timeout=None):
             return DummyResponse({"version": 1, "tools": []})
 
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         with pytest.raises(RuntimeError, match="Unsupported manifest version"):
@@ -255,7 +255,7 @@ class TestFetchManifest:
         def fake_get(url, timeout=None):
             return DummyResponse({"version": 99, "tools": []})
 
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         with pytest.raises(RuntimeError, match="Unsupported manifest version"):
@@ -265,7 +265,7 @@ class TestFetchManifest:
         def fake_get(url, timeout=None):
             return DummyResponse("Not Found", status_code=404)
 
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)  # type: ignore[reportPrivateImportUsage]
 
         client = trpc_client.TrpcClient(trpc_client.load_config())
         with pytest.raises(RuntimeError, match="HTTP 404"):
@@ -282,7 +282,7 @@ class TestCallTool:
         def fake_get(url, timeout=None):
             return DummyResponse(SAMPLE_MANIFEST_V2)
 
-        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)  # type: ignore[reportPrivateImportUsage]
 
         # Reset cached client so each test gets a fresh server
         server._CLIENT = None

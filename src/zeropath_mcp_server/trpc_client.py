@@ -48,8 +48,8 @@ def load_config() -> ZeropathConfig:
 
     return ZeropathConfig(
         base_url=base_url.rstrip("/"),
-        token_id=token_id,
-        token_secret=token_secret,
+        token_id=token_id,  # type: ignore[reportArgumentType]
+        token_secret=token_secret,  # type: ignore[reportArgumentType]
         organization_id=organization_id,
     )
 
