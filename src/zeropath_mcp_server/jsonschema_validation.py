@@ -10,10 +10,9 @@ error so we don't silently "validate" incorrectly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any
-
 
 JsonObject = dict[str, Any]
 
@@ -61,7 +60,7 @@ def _is_integer(value: Any) -> bool:
 
 
 def _is_number(value: Any) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool))
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _type_matches(value: Any, typ: str) -> bool:
@@ -203,7 +202,9 @@ def _validate(
         for key, value in instance.items():
             sub_path = f"{path}/{key}" if path else key
             if isinstance(properties, dict) and key in properties:
-                _validate(value, properties[key], path=sub_path, issues=issues, root_schema=root_schema, ref_stack=ref_stack)
+                _validate(
+                    value, properties[key], path=sub_path, issues=issues, root_schema=root_schema, ref_stack=ref_stack
+                )
                 continue
 
             if additional is False:
