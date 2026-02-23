@@ -5,6 +5,7 @@ Usage:
     python -m zeropath_mcp_server
     zeropath-mcp-server
 """
+
 import asyncio
 
 from mcp.server.stdio import stdio_server
