@@ -15,11 +15,9 @@ os.environ.setdefault("ZEROPATH_BASE_URL", "https://example.com")
 import json
 
 import pytest
-
 import zeropath_mcp_server.trpc_client as trpc_client
 from zeropath_mcp_server import server
 from zeropath_mcp_server.jsonschema_validation import validate as validate_jsonschema
-
 
 SAMPLE_MANIFEST_V2 = {
     "version": 2,
@@ -294,6 +292,7 @@ class TestCallTool:
 
     def test_unknown_tool_returns_error(self, mock_server_v2):
         import asyncio
+
         import mcp.types as types
 
         handler = mock_server_v2.request_handlers[types.CallToolRequest]
@@ -310,6 +309,7 @@ class TestCallTool:
 
     def test_schema_validation_failure_returns_bad_request(self, mock_server_v2):
         import asyncio
+
         import mcp.types as types
 
         handler = mock_server_v2.request_handlers[types.CallToolRequest]

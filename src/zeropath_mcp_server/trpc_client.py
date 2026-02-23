@@ -7,9 +7,11 @@ the stable `/api/v2/` REST surface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
 import requests
 
 JsonObject = dict[str, Any]
@@ -42,7 +44,7 @@ def load_config() -> ZeropathConfig:
     ]
 
     if missing:
-        raise EnvironmentError("Missing required environment variables: " + ", ".join(missing))
+        raise OSError("Missing required environment variables: " + ", ".join(missing))
 
     return ZeropathConfig(
         base_url=base_url.rstrip("/"),

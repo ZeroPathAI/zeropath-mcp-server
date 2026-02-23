@@ -21,8 +21,9 @@ from typing import Any
 import mcp.types as types
 from mcp.server.lowlevel import Server
 
+from .jsonschema_validation import UnsupportedSchemaError
+from .jsonschema_validation import validate as validate_jsonschema
 from .trpc_client import TrpcClient, load_config
-from .jsonschema_validation import UnsupportedSchemaError, validate as validate_jsonschema
 
 JsonObject = dict[str, Any]
 
