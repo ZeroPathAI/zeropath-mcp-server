@@ -4,6 +4,7 @@ Helpers for calling ZeroPath V2 REST API endpoints.
 Despite the module name (kept for import compatibility), this client calls
 the stable `/api/v2/` REST surface.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,9 +42,7 @@ def load_config() -> ZeropathConfig:
     ]
 
     if missing:
-        raise EnvironmentError(
-            "Missing required environment variables: " + ", ".join(missing)
-        )
+        raise EnvironmentError("Missing required environment variables: " + ", ".join(missing))
 
     return ZeropathConfig(
         base_url=base_url.rstrip("/"),
@@ -133,9 +132,7 @@ class TrpcClient:
         # REST handlers return errors as {"error": "message"} with non-200 status
         if response.status_code >= 400:
             error_message = (
-                response_json.get("error", "Unknown error")
-                if isinstance(response_json, dict)
-                else str(response_json)
+                response_json.get("error", "Unknown error") if isinstance(response_json, dict) else str(response_json)
             )
             return make_error(
                 "API_ERROR",
@@ -152,21 +149,15 @@ class TrpcClient:
         try:
             response = requests.get(url, timeout=DEFAULT_TIMEOUT_SECONDS)
         except requests.RequestException as exc:
-            raise RuntimeError(
-                f"Failed to fetch MCP manifest from {url}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to fetch MCP manifest from {url}: {exc}") from exc
 
         if response.status_code != 200:
-            raise RuntimeError(
-                f"MCP manifest returned HTTP {response.status_code}: {response.text[:200]}"
-            )
+            raise RuntimeError(f"MCP manifest returned HTTP {response.status_code}: {response.text[:200]}")
 
         try:
             data = response.json()
         except ValueError as exc:
-            raise RuntimeError(
-                f"MCP manifest returned non-JSON response: {response.text[:200]}"
-            ) from exc
+            raise RuntimeError(f"MCP manifest returned non-JSON response: {response.text[:200]}") from exc
 
         if not isinstance(data, dict) or data.get("version") != 2:
             raise RuntimeError(

@@ -71,8 +71,7 @@ def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str 
             arguments["organizationId"] = organization_id
         elif behavior == "required":
             return (
-                "organizationId is required for this operation. "
-                "Pass organizationId explicitly or set ZEROPATH_ORG_ID."
+                "organizationId is required for this operation. Pass organizationId explicitly or set ZEROPATH_ORG_ID."
             )
 
     return None
@@ -121,26 +120,19 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
         org_id_behavior = entry.get("orgIdBehavior", "none")
         if not isinstance(org_id_behavior, str) or org_id_behavior not in _ALLOWED_ORG_ID_BEHAVIORS:
             raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].orgIdBehavior must be one of "
-                f"{sorted(_ALLOWED_ORG_ID_BEHAVIORS)}"
+                f"Invalid MCP manifest: tools[{idx}].orgIdBehavior must be one of {sorted(_ALLOWED_ORG_ID_BEHAVIORS)}"
             )
 
         http_method = entry.get("httpMethod")
         if not isinstance(http_method, str) or not http_method.strip():
-            raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].httpMethod must be a non-empty string"
-            )
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpMethod must be a non-empty string")
         http_method = http_method.upper()
         if http_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-            raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].httpMethod must be a valid HTTP method"
-            )
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpMethod must be a valid HTTP method")
 
         http_path = entry.get("httpPath")
         if not isinstance(http_path, str) or not http_path.strip():
-            raise RuntimeError(
-                f"Invalid MCP manifest: tools[{idx}].httpPath must be a non-empty string"
-            )
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpPath must be a non-empty string")
         if not http_path.startswith("/api/v2/"):
             raise RuntimeError(
                 f"Invalid MCP manifest: tools[{idx}].httpPath must start with '/api/v2/' (got {http_path!r})"
@@ -186,13 +178,9 @@ def create_server() -> Server:
         return tools
 
     @server.call_tool()
-    async def call_tool(
-        name: str, arguments: dict[str, Any] | None
-    ) -> list[types.TextContent]:
+    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.TextContent]:
         if name not in metadata:
-            raise RuntimeError(
-                json.dumps({"error": {"code": "NOT_FOUND", "message": f"Unknown tool: {name}"}})
-            )
+            raise RuntimeError(json.dumps({"error": {"code": "NOT_FOUND", "message": f"Unknown tool: {name}"}}))
 
         meta = metadata[name]
         args = dict(arguments or {})
