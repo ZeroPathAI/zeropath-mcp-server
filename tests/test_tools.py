@@ -228,10 +228,70 @@ class TestRestClient:
         assert "error" in result
         assert result["error"]["code"] == "API_ERROR"
 
+    def test_rest_post_includes_chatkit_token_header(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        captured = {}
+
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["headers"] = headers
+            return DummyResponse({"issues": [], "totalCount": 0})
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
+        )
+
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "chatkit-token-value"
+
+
+class TestLoadConfig:
+    def test_accepts_session_cookie_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_SESSION_COOKIE", "zp_session=session-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.session_cookie == "zp_session=session-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_accepts_chatkit_token_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.chatkit_token == "chatkit-token-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_rejects_ambiguous_auth_modes(self, monkeypatch):
+        monkeypatch.setenv("ZEROPATH_TOKEN_ID", "token-id")
+        monkeypatch.setenv("ZEROPATH_TOKEN_SECRET", "token-secret")
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+
+        with pytest.raises(OSError, match="Ambiguous credentials"):
+            trpc_client.load_config()
+
 
 class TestFetchManifest:
     def test_successful_fetch_v2(self, monkeypatch):
-        def fake_get(url, timeout=None):
+        def fake_get(url, headers=None, timeout=None):
             return DummyResponse(SAMPLE_MANIFEST_V2)
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
@@ -242,7 +302,7 @@ class TestFetchManifest:
         assert len(result["tools"]) == 3
 
     def test_rejects_v1(self, monkeypatch):
-        def fake_get(url, timeout=None):
+        def fake_get(url, headers=None, timeout=None):
             return DummyResponse({"version": 1, "tools": []})
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
@@ -252,7 +312,7 @@ class TestFetchManifest:
             client.fetch_manifest()
 
     def test_rejects_bad_version(self, monkeypatch):
-        def fake_get(url, timeout=None):
+        def fake_get(url, headers=None, timeout=None):
             return DummyResponse({"version": 99, "tools": []})
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
@@ -262,7 +322,7 @@ class TestFetchManifest:
             client.fetch_manifest()
 
     def test_rejects_http_error(self, monkeypatch):
-        def fake_get(url, timeout=None):
+        def fake_get(url, headers=None, timeout=None):
             return DummyResponse("Not Found", status_code=404)
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)
@@ -279,7 +339,7 @@ class TestCallTool:
     def mock_server_v2(self, monkeypatch):
         """Create a server with a mocked v2 manifest fetch."""
 
-        def fake_get(url, timeout=None):
+        def fake_get(url, headers=None, timeout=None):
             return DummyResponse(SAMPLE_MANIFEST_V2)
 
         monkeypatch.setattr(trpc_client.requests, "get", fake_get)

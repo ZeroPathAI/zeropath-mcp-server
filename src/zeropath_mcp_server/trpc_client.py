@@ -18,38 +18,53 @@ JsonObject = dict[str, Any]
 
 DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
+CHATKIT_TOKEN_HEADER = "X-ZeroPath-ChatKit-Token"
 
 
 @dataclass(frozen=True)
 class ZeropathConfig:
     base_url: str
-    token_id: str
-    token_secret: str
+    token_id: str | None
+    token_secret: str | None
+    session_cookie: str | None
+    chatkit_token: str | None
     organization_id: str | None
 
 
 def load_config() -> ZeropathConfig:
     token_id = os.getenv("ZEROPATH_TOKEN_ID")
     token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
+    session_cookie = os.getenv("ZEROPATH_SESSION_COOKIE")
+    chatkit_token = os.getenv("ZEROPATH_CHATKIT_TOKEN")
     organization_id = os.getenv("ZEROPATH_ORG_ID")
     base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com")
 
-    missing = [
-        name
-        for name, value in (
-            ("ZEROPATH_TOKEN_ID", token_id),
-            ("ZEROPATH_TOKEN_SECRET", token_secret),
+    if (token_id and not token_secret) or (token_secret and not token_id):
+        raise OSError(
+            "ZEROPATH_TOKEN_ID and ZEROPATH_TOKEN_SECRET must both be set when using API token authentication"
         )
-        if not value
-    ]
 
-    if missing:
-        raise OSError("Missing required environment variables: " + ", ".join(missing))
+    auth_mode_count = int(bool(token_id and token_secret)) + int(bool(chatkit_token)) + int(bool(session_cookie))
+
+    if auth_mode_count == 0:
+        raise OSError(
+            "Missing required credentials: set either "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_CHATKIT_TOKEN, "
+            "or ZEROPATH_SESSION_COOKIE"
+        )
+    if auth_mode_count > 1:
+        raise OSError(
+            "Ambiguous credentials: configure exactly one auth mode among "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_CHATKIT_TOKEN, "
+            "or ZEROPATH_SESSION_COOKIE"
+        )
 
     return ZeropathConfig(
         base_url=base_url.rstrip("/"),
         token_id=token_id,
         token_secret=token_secret,
+        session_cookie=session_cookie,
+        chatkit_token=chatkit_token,
         organization_id=organization_id,
     )
 
@@ -99,12 +114,7 @@ class TrpcClient:
             )
 
         url = f"{self._config.base_url}{http_path}"
-        headers = {
-            "X-ZeroPath-API-Token-Id": self._config.token_id,
-            "X-ZeroPath-API-Token-Secret": self._config.token_secret,
-            "X-ZeroPath-Client": CLIENT_HEADER_VALUE,
-            "Content-Type": "application/json",
-        }
+        headers = self._build_headers()
 
         try:
             response = requests.request(
@@ -149,7 +159,11 @@ class TrpcClient:
         url = f"{self._config.base_url}/mcp-manifest.json"
 
         try:
-            response = requests.get(url, timeout=DEFAULT_TIMEOUT_SECONDS)
+            response = requests.get(
+                url,
+                headers=self._build_headers(include_content_type=False),
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+            )
         except requests.RequestException as exc:
             raise RuntimeError(f"Failed to fetch MCP manifest from {url}: {exc}") from exc
 
@@ -167,3 +181,23 @@ class TrpcClient:
             )
 
         return data
+
+    def _build_headers(self, *, include_content_type: bool = True) -> dict[str, str]:
+        headers = {
+            "X-ZeroPath-Client": CLIENT_HEADER_VALUE,
+        }
+
+        if include_content_type:
+            headers["Content-Type"] = "application/json"
+
+        if self._config.token_id and self._config.token_secret:
+            headers["X-ZeroPath-API-Token-Id"] = self._config.token_id
+            headers["X-ZeroPath-API-Token-Secret"] = self._config.token_secret
+
+        if self._config.chatkit_token:
+            headers[CHATKIT_TOKEN_HEADER] = self._config.chatkit_token
+
+        if self._config.session_cookie:
+            headers["Cookie"] = self._config.session_cookie
+
+        return headers
