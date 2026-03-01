@@ -7,6 +7,7 @@ the stable `/api/v2/` REST surface.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ JsonObject = dict[str, Any]
 DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
 CHATKIT_TOKEN_HEADER = "X-ZeroPath-ChatKit-Token"
+MAX_ERROR_BODY_CHARS = 2000
 
 
 @dataclass(frozen=True)
@@ -71,14 +73,18 @@ def load_config() -> ZeropathConfig:
 
 def make_error(
     code: str,
-    message: str,
+    message: Any,
     *,
     data: Mapping[str, Any] | None = None,
     http_status: int | None = None,
 ) -> JsonObject:
+    normalized_message = str(message).strip() if message is not None else ""
+    if not normalized_message:
+        normalized_message = "Unknown error"
+
     error: JsonObject = {
         "code": code,
-        "message": message,
+        "message": normalized_message,
     }
     if data:
         error["data"] = dict(data)
@@ -134,21 +140,46 @@ class TrpcClient:
         try:
             response_json = response.json()
         except ValueError:
+            body_preview = response.text[:MAX_ERROR_BODY_CHARS]
             return make_error(
                 "BAD_RESPONSE",
                 "ZeroPath returned non-JSON response",
-                data={"body": response.text},
+                data={"body": body_preview},
                 http_status=response.status_code,
             )
 
         # REST handlers return errors as {"error": "message"} with non-200 status
         if response.status_code >= 400:
-            error_message = (
-                response_json.get("error", "Unknown error") if isinstance(response_json, dict) else str(response_json)
-            )
+            error_message = f"ZeroPath API returned HTTP {response.status_code}"
+            error_data: dict[str, Any] = {"response": response_json}
+
+            if isinstance(response_json, dict):
+                if "error" in response_json:
+                    error_field = response_json.get("error")
+                    error_message = _extract_error_message(error_field, fallback=error_message)
+                    if isinstance(error_field, dict):
+                        if "code" in error_field:
+                            error_data["apiCode"] = error_field["code"]
+                        if "data" in error_field:
+                            error_data["apiData"] = error_field["data"]
+                        if "requestId" in error_field:
+                            error_data["requestId"] = error_field["requestId"]
+                elif "message" in response_json:
+                    error_message = _extract_error_message(response_json.get("message"), fallback=error_message)
+                else:
+                    error_message = _extract_error_message(response_json, fallback=error_message)
+            else:
+                error_message = _extract_error_message(response_json, fallback=error_message)
+
+            if isinstance(response_json, dict):
+                raw_error = response_json.get("error")
+                if isinstance(raw_error, str) and not raw_error.strip():
+                    error_data["emptyErrorField"] = True
+
             return make_error(
                 "API_ERROR",
                 error_message,
+                data=error_data,
                 http_status=response.status_code,
             )
 
@@ -201,3 +232,35 @@ class TrpcClient:
             headers["Cookie"] = self._config.session_cookie
 
         return headers
+
+
+def _extract_error_message(raw: Any, *, fallback: str) -> str:
+    """Return a non-empty error message string from any error payload shape."""
+    if isinstance(raw, str):
+        message = raw.strip()
+        return message if message else fallback
+
+    if isinstance(raw, Mapping):
+        for key in ("message", "detail", "error", "title"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        serialized = _safe_json_dump(raw)
+        if serialized and serialized != "{}":
+            return f"{fallback}: {serialized}"
+        return fallback
+
+    if raw is None:
+        return fallback
+
+    rendered = str(raw).strip()
+    return rendered if rendered else fallback
+
+
+def _safe_json_dump(value: Any) -> str:
+    try:
+        dumped = json.dumps(value, default=str)
+    except Exception:
+        return str(value)
+    return dumped[:MAX_ERROR_BODY_CHARS]

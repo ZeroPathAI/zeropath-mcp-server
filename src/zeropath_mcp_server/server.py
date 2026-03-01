@@ -166,6 +166,57 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
     return tools, metadata
 
 
+def _normalize_tool_error_payload(
+    result: JsonObject,
+    *,
+    tool_name: str,
+    http_method: str,
+    http_path: str,
+) -> JsonObject:
+    """Ensure tool errors always expose a non-empty string message + rich metadata."""
+    raw_error = result.get("error")
+    if not isinstance(raw_error, dict):
+        raw_error = {"message": raw_error}
+
+    raw_message = raw_error.get("message")
+    if isinstance(raw_message, str):
+        message = raw_message.strip()
+    else:
+        message = ""
+    if not message:
+        message = f"Tool {tool_name} failed"
+
+    normalized: JsonObject = {
+        "error": {
+            "code": str(raw_error.get("code") or "TOOL_ERROR"),
+            "message": message,
+        }
+    }
+
+    http_status = raw_error.get("httpStatus")
+    if http_status is not None:
+        normalized["error"]["httpStatus"] = http_status
+
+    data: JsonObject = {}
+    raw_data = raw_error.get("data")
+    if isinstance(raw_data, dict):
+        data.update(raw_data)
+    elif raw_data is not None:
+        data["rawData"] = raw_data
+
+    data.setdefault("tool", tool_name)
+    data.setdefault("httpMethod", http_method)
+    data.setdefault("httpPath", http_path)
+
+    if isinstance(raw_message, str) and not raw_message.strip():
+        data.setdefault("messageWasEmpty", True)
+    elif raw_message is not None and not isinstance(raw_message, str):
+        data.setdefault("rawMessage", raw_message)
+
+    normalized["error"]["data"] = data
+    return normalized
+
+
 def create_server() -> Server:
     """Create and return the MCP server with manifest-driven tools."""
     client = _get_client()
@@ -214,14 +265,44 @@ def create_server() -> Server:
                 )
             )
 
-        result = await asyncio.to_thread(
-            client.call,
-            meta["httpPath"],
-            args,
-            http_method=meta["httpMethod"],
-        )
+        try:
+            result = await asyncio.to_thread(
+                client.call,
+                meta["httpPath"],
+                args,
+                http_method=meta["httpMethod"],
+            )
+        except Exception as exc:
+            detail = str(exc).strip() or repr(exc)
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "INTERNAL_ERROR",
+                            "message": f"Failed to invoke ZeroPath API for tool {name}",
+                            "data": {
+                                "tool": name,
+                                "httpMethod": meta["httpMethod"],
+                                "httpPath": meta["httpPath"],
+                                "exceptionType": type(exc).__name__,
+                                "detail": detail,
+                            },
+                        }
+                    }
+                )
+            ) from exc
+
         if isinstance(result, dict) and "error" in result:
-            raise RuntimeError(json.dumps(result))
+            raise RuntimeError(
+                json.dumps(
+                    _normalize_tool_error_payload(
+                        result,
+                        tool_name=name,
+                        http_method=meta["httpMethod"],
+                        http_path=meta["httpPath"],
+                    )
+                )
+            )
         return [types.TextContent(type="text", text=json.dumps(result))]
 
     return server

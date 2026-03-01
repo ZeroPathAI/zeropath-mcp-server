@@ -93,21 +93,21 @@ class TestBuildTools:
         tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
         assert len(tools) == 3
-        assert tools[0].name == "issues.list"
+        assert tools[0].name == "issues_list"
         assert tools[0].description == "List security issues"
 
     def test_preserves_http_metadata(self):
         _, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-        assert metadata["issues.list"]["httpMethod"] == "POST"
-        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
-        assert metadata["issues.list"]["orgIdBehavior"] == "inject-if-missing"
+        assert metadata["issues_list"]["httpMethod"] == "POST"
+        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues_list"]["orgIdBehavior"] == "inject-if-missing"
 
-        assert metadata["stats.assets"]["httpMethod"] == "POST"
-        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"
+        assert metadata["stats_assets"]["httpMethod"] == "POST"
+        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
 
-        assert metadata["rules.get"]["httpMethod"] == "POST"
-        assert metadata["rules.get"]["httpPath"] == "/api/v2/rules/get"
+        assert metadata["rules_get"]["httpMethod"] == "POST"
+        assert metadata["rules_get"]["httpPath"] == "/api/v2/rules/get"
 
     def test_empty_manifest(self):
         tools, metadata = server._build_tools({"version": 2, "tools": []})
@@ -227,6 +227,40 @@ class TestRestClient:
         )
         assert "error" in result
         assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "Unauthorized"
+        assert result["error"]["httpStatus"] == 401
+
+    def test_rest_error_with_nested_message_is_extracted(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse(
+                {"error": {"message": "JWT expired", "code": "UNAUTHORIZED", "requestId": "req_123"}},
+                status_code=401,
+            )
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call("/api/v2/issues/search", {}, http_method="POST")
+
+        assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "JWT expired"
+        assert result["error"]["httpStatus"] == 401
+        assert result["error"]["data"]["apiCode"] == "UNAUTHORIZED"
+        assert result["error"]["data"]["requestId"] == "req_123"
+
+    def test_rest_error_empty_message_falls_back_to_http_status(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse({"error": ""}, status_code=500)
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call("/api/v2/issues/search", {}, http_method="POST")
+
+        assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "ZeroPath API returned HTTP 500"
+        assert result["error"]["httpStatus"] == 500
+        assert result["error"]["data"]["emptyErrorField"] is True
 
     def test_rest_post_includes_chatkit_token_header(self, monkeypatch):
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
@@ -375,7 +409,7 @@ class TestCallTool:
         handler = mock_server_v2.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
             method="tools/call",
-            params=types.CallToolRequestParams(name="rules.get", arguments={}),
+            params=types.CallToolRequestParams(name="rules_get", arguments={}),
         )
         result = asyncio.run(handler(req))
 
@@ -384,15 +418,51 @@ class TestCallTool:
         assert payload["error"]["code"] == "BAD_REQUEST"
         assert payload["error"]["message"] == "Input validation failed"
 
+    def test_tool_error_payload_normalizes_empty_message(self, mock_server_v2, monkeypatch):
+        import asyncio
+
+        import mcp.types as types
+
+        client = server._get_client()
+
+        def fake_call(http_path, payload, *, http_method="POST"):
+            return {
+                "error": {
+                    "code": "API_ERROR",
+                    "message": "",
+                    "httpStatus": 500,
+                    "data": {"requestId": "req_999"},
+                }
+            }
+
+        monkeypatch.setattr(client, "call", fake_call)
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="issues_list", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "API_ERROR"
+        assert payload["error"]["message"] == "Tool issues_list failed"
+        assert payload["error"]["httpStatus"] == 500
+        assert payload["error"]["data"]["requestId"] == "req_999"
+        assert payload["error"]["data"]["messageWasEmpty"] is True
+        assert payload["error"]["data"]["httpPath"] == "/api/v2/issues/search"
+        assert payload["error"]["data"]["httpMethod"] == "POST"
+
     def test_build_tools_v2_roundtrip(self):
         """Verify _build_tools produces correct Tool objects for v2."""
         tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
         names = [t.name for t in tools]
-        assert "issues.list" in names
-        assert "stats.assets" in names
-        assert "rules.get" in names
+        assert "issues_list" in names
+        assert "stats_assets" in names
+        assert "rules_get" in names
 
-        assert metadata["issues.list"]["httpPath"] == "/api/v2/issues/search"
-        assert metadata["issues.list"]["httpMethod"] == "POST"
-        assert metadata["stats.assets"]["httpPath"] == "/api/v2/stats/assets"
+        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues_list"]["httpMethod"] == "POST"
+        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
