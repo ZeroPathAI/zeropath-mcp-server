@@ -226,6 +226,7 @@ class TestRestClient:
             http_method="POST",
         )
         assert "error" in result
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
         assert result["error"]["code"] == "API_ERROR"
         assert result["error"]["message"] == "Unauthorized"
         assert result["error"]["httpStatus"] == 401
@@ -242,6 +243,7 @@ class TestRestClient:
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.call("/api/v2/issues/search", {}, http_method="POST")
 
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
         assert result["error"]["code"] == "API_ERROR"
         assert result["error"]["message"] == "JWT expired"
         assert result["error"]["httpStatus"] == 401
@@ -257,6 +259,7 @@ class TestRestClient:
         client = trpc_client.TrpcClient(trpc_client.load_config())
         result = client.call("/api/v2/issues/search", {}, http_method="POST")
 
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
         assert result["error"]["code"] == "API_ERROR"
         assert result["error"]["message"] == "ZeroPath API returned HTTP 500"
         assert result["error"]["httpStatus"] == 500
@@ -453,6 +456,37 @@ class TestCallTool:
         assert payload["error"]["data"]["messageWasEmpty"] is True
         assert payload["error"]["data"]["httpPath"] == "/api/v2/issues/search"
         assert payload["error"]["data"]["httpMethod"] == "POST"
+
+    def test_tool_result_with_error_field_is_not_treated_as_transport_error(
+        self, mock_server_v2, monkeypatch
+    ):
+        import asyncio
+
+        import mcp.types as types
+
+        client = server._get_client()
+
+        def fake_call(http_path, payload, *, http_method="POST"):
+            return {
+                "id": "issue_123",
+                "error": "Source parsing failed for one path",
+                "issueStatus": "REVIEWING",
+            }
+
+        monkeypatch.setattr(client, "call", fake_call)
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="issues_list", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is False
+        payload = json.loads(result.root.content[0].text)
+        assert payload["id"] == "issue_123"
+        assert payload["error"] == "Source parsing failed for one path"
+        assert payload["issueStatus"] == "REVIEWING"
 
     def test_build_tools_v2_roundtrip(self):
         """Verify _build_tools produces correct Tool objects for v2."""

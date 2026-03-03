@@ -21,6 +21,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
 CHATKIT_TOKEN_HEADER = "X-ZeroPath-ChatKit-Token"
 MAX_ERROR_BODY_CHARS = 2000
+MCP_ERROR_SENTINEL_KEY = "__zeropath_mcp_error__"
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ def make_error(
         error["data"] = dict(data)
     if http_status is not None:
         error["httpStatus"] = http_status
-    return {"error": error}
+    return {MCP_ERROR_SENTINEL_KEY: True, "error": error}
 
 
 class TrpcClient:
