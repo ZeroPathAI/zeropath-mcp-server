@@ -457,9 +457,7 @@ class TestCallTool:
         assert payload["error"]["data"]["httpPath"] == "/api/v2/issues/search"
         assert payload["error"]["data"]["httpMethod"] == "POST"
 
-    def test_tool_result_with_error_field_is_not_treated_as_transport_error(
-        self, mock_server_v2, monkeypatch
-    ):
+    def test_tool_result_with_error_field_is_not_treated_as_transport_error(self, mock_server_v2, monkeypatch):
         import asyncio
 
         import mcp.types as types
