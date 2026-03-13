@@ -78,6 +78,29 @@ def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str 
     return None
 
 
+def _strip_org_id_from_schema(schema: JsonObject) -> JsonObject:
+    """Return a copy of the JSON Schema with the organizationId property removed.
+
+    This prevents the LLM from seeing organizationId as an input parameter,
+    since it's injected automatically from ZEROPATH_ORG_ID.
+    """
+    import copy
+
+    out = copy.deepcopy(schema)
+    props = out.get("properties")
+    if isinstance(props, dict):
+        props.pop("organizationId", None)
+    req = out.get("required")
+    if isinstance(req, list) and "organizationId" in req:
+        out["required"] = [r for r in req if r != "organizationId"]
+    # Handle allOf / anyOf / oneOf (composition keywords)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        variants = out.get(keyword)
+        if isinstance(variants, list):
+            out[keyword] = [_strip_org_id_from_schema(v) if isinstance(v, dict) else v for v in variants]
+    return out
+
+
 def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, JsonObject]]:
     """Parse the manifest into MCP Tool objects and a metadata lookup.
 
@@ -149,18 +172,23 @@ def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, Json
         if name in metadata:
             raise RuntimeError(f"Invalid MCP manifest: duplicate tool name {name!r}")
 
+        # Strip organizationId from the schema the LLM sees — it's injected
+        # automatically by the MCP server from ZEROPATH_ORG_ID and should
+        # never be provided by the caller.
+        llm_schema = _strip_org_id_from_schema(input_schema) if org_id_behavior != "none" else input_schema
+
         tools.append(
             types.Tool(
                 name=name,
                 description=description,
-                inputSchema=input_schema,
+                inputSchema=llm_schema,
             )
         )
         metadata[name] = {
             "httpMethod": http_method,
             "httpPath": http_path,
             "orgIdBehavior": org_id_behavior,
-            "inputSchema": input_schema,
+            "inputSchema": input_schema,  # Full schema (with orgId) for HTTP calls
         }
 
     return tools, metadata
