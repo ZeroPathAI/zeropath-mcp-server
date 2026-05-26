@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
+from uuid import UUID
 
 JsonObject = dict[str, Any]
 
@@ -79,6 +81,44 @@ def _type_matches(value: Any, typ: str) -> bool:
     if typ == "null":
         return value is None
     raise UnsupportedSchemaError(f"Unsupported JSON Schema type {typ!r}")
+
+
+def _non_negative_integer_keyword(schema: JsonObject, key: str) -> int | None:
+    value = schema.get(key)
+    if value is None:
+        return None
+    if not _is_integer(value) or value < 0:
+        raise UnsupportedSchemaError(f"{key} must be a non-negative integer")
+    return value
+
+
+def _number_keyword(schema: JsonObject, key: str) -> int | float | None:
+    value = schema.get(key)
+    if value is None:
+        return None
+    if not _is_number(value):
+        raise UnsupportedSchemaError(f"{key} must be a number")
+    return value
+
+
+def _matches_format(value: str, fmt: str) -> bool:
+    if fmt == "uuid":
+        try:
+            UUID(value)
+        except ValueError:
+            return False
+        return True
+
+    if fmt == "uri":
+        parsed = urlparse(value)
+        return bool(parsed.scheme)
+
+    if fmt == "email":
+        return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
+
+    # JSON Schema treats unknown formats as annotations. Do not fail the whole
+    # client-side validator when the manifest adds a new format we don't know.
+    return True
 
 
 def validate(
@@ -180,6 +220,47 @@ def _validate(
         if not any(_type_matches(instance, t) for t in allowed_types):
             issues.append(ValidationIssue(path, f"Expected type {allowed_types!r}"))
             return
+
+    if isinstance(instance, str):
+        min_length = _non_negative_integer_keyword(schema, "minLength")
+        max_length = _non_negative_integer_keyword(schema, "maxLength")
+        if min_length is not None and len(instance) < min_length:
+            issues.append(ValidationIssue(path, f"Expected string length at least {min_length}"))
+        if max_length is not None and len(instance) > max_length:
+            issues.append(ValidationIssue(path, f"Expected string length at most {max_length}"))
+
+        pattern = schema.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                raise UnsupportedSchemaError("pattern must be a string")
+            try:
+                pattern_matches = re.search(pattern, instance) is not None
+            except re.error as exc:
+                raise UnsupportedSchemaError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
+            if not pattern_matches:
+                issues.append(ValidationIssue(path, "String does not match pattern"))
+
+        fmt = schema.get("format")
+        if fmt is not None:
+            if not isinstance(fmt, str):
+                raise UnsupportedSchemaError("format must be a string")
+            if not _matches_format(instance, fmt):
+                issues.append(ValidationIssue(path, f"String does not match format {fmt!r}"))
+
+    if _is_number(instance):
+        minimum = _number_keyword(schema, "minimum")
+        maximum = _number_keyword(schema, "maximum")
+        exclusive_minimum = _number_keyword(schema, "exclusiveMinimum")
+        exclusive_maximum = _number_keyword(schema, "exclusiveMaximum")
+
+        if minimum is not None and instance < minimum:
+            issues.append(ValidationIssue(path, f"Expected value at least {minimum}"))
+        if maximum is not None and instance > maximum:
+            issues.append(ValidationIssue(path, f"Expected value at most {maximum}"))
+        if exclusive_minimum is not None and instance <= exclusive_minimum:
+            issues.append(ValidationIssue(path, f"Expected value greater than {exclusive_minimum}"))
+        if exclusive_maximum is not None and instance >= exclusive_maximum:
+            issues.append(ValidationIssue(path, f"Expected value less than {exclusive_maximum}"))
 
     # Type-specific validation
     if isinstance(instance, dict):

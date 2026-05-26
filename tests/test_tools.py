@@ -17,6 +17,7 @@ import json
 import pytest
 import zeropath_mcp_server.trpc_client as trpc_client
 from zeropath_mcp_server import server
+from zeropath_mcp_server.jsonschema_validation import UnsupportedSchemaError
 from zeropath_mcp_server.jsonschema_validation import validate as validate_jsonschema
 
 SAMPLE_MANIFEST_V2 = {
@@ -120,6 +121,81 @@ class TestJsonschemaValidation:
         schema = {"$ref": "#/definitions/IssuesListInput"}
         issues = validate_jsonschema({"organizationId": "org_test"}, schema, root_schema=REF_ROOT_SCHEMA)
         assert any(i.path == "page" and "Missing required" in i.message for i in issues)
+
+    def test_string_length_constraints(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "repositoryId": {"type": "string", "minLength": 8, "maxLength": 12},
+            },
+        }
+
+        too_short = validate_jsonschema({"repositoryId": "repo"}, schema)
+        too_long = validate_jsonschema({"repositoryId": "repo_1234567890"}, schema)
+        valid = validate_jsonschema({"repositoryId": "repo_12345"}, schema)
+
+        assert any(i.path == "repositoryId" and "at least 8" in i.message for i in too_short)
+        assert any(i.path == "repositoryId" and "at most 12" in i.message for i in too_long)
+        assert valid == []
+
+    def test_numeric_range_constraints(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "minimum": 1},
+                "pageSize": {"type": "integer", "minimum": 1, "maximum": 100},
+                "score": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            },
+        }
+
+        issues = validate_jsonschema({"page": 0, "pageSize": 101, "score": 1}, schema)
+
+        assert any(i.path == "page" and "at least 1" in i.message for i in issues)
+        assert any(i.path == "pageSize" and "at most 100" in i.message for i in issues)
+        assert any(i.path == "score" and "less than 1" in i.message for i in issues)
+
+    def test_common_format_constraints(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "repositoryId": {"type": "string", "format": "uuid"},
+                "docsUrl": {"type": "string", "format": "uri"},
+                "assignee": {"type": "string", "format": "email"},
+            },
+        }
+
+        invalid = validate_jsonschema(
+            {
+                "repositoryId": "not-a-uuid",
+                "docsUrl": "not a uri",
+                "assignee": "bad-email",
+            },
+            schema,
+        )
+        valid = validate_jsonschema(
+            {
+                "repositoryId": "00000000-0000-0000-0000-000000000000",
+                "docsUrl": "https://zeropath.com/docs",
+                "assignee": "security@example.com",
+            },
+            schema,
+        )
+
+        assert any(i.path == "repositoryId" and "uuid" in i.message for i in invalid)
+        assert any(i.path == "docsUrl" and "uri" in i.message for i in invalid)
+        assert any(i.path == "assignee" and "email" in i.message for i in invalid)
+        assert valid == []
+
+    def test_pattern_constraint(self):
+        schema = {"type": "string", "pattern": "^repo_[a-z0-9]+$"}
+
+        issues = validate_jsonschema("repository_123", schema)
+
+        assert any("pattern" in i.message for i in issues)
+
+    def test_invalid_length_keyword_raises_unsupported(self):
+        with pytest.raises(UnsupportedSchemaError, match="minLength"):
+            validate_jsonschema("repo_123", {"type": "string", "minLength": -1})
 
 
 class TestApplyOrgId:
