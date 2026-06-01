@@ -265,11 +265,11 @@ class TestRestClient:
         assert result["error"]["httpStatus"] == 500
         assert result["error"]["data"]["emptyErrorField"] is True
 
-    def test_rest_post_includes_chatkit_token_header(self, monkeypatch):
+    def test_rest_post_includes_mcp_token_header(self, monkeypatch):
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
         monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
-        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
         captured = {}
@@ -288,14 +288,14 @@ class TestRestClient:
         )
 
         assert result == {"issues": [], "totalCount": 0}
-        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "chatkit-token-value"
+        assert captured["headers"]["X-ZeroPath-MCP-Token"] == "mcp-token-value"
 
 
 class TestLoadConfig:
     def test_accepts_session_cookie_auth(self, monkeypatch):
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
-        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
         monkeypatch.setenv("ZEROPATH_SESSION_COOKIE", "zp_session=session-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
@@ -304,22 +304,22 @@ class TestLoadConfig:
         assert cfg.token_id is None
         assert cfg.token_secret is None
 
-    def test_accepts_chatkit_token_auth(self, monkeypatch):
+    def test_accepts_mcp_token_auth(self, monkeypatch):
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
         monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
-        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
         cfg = trpc_client.load_config()
-        assert cfg.chatkit_token == "chatkit-token-value"
+        assert cfg.mcp_token == "mcp-token-value"
         assert cfg.token_id is None
         assert cfg.token_secret is None
 
     def test_rejects_ambiguous_auth_modes(self, monkeypatch):
         monkeypatch.setenv("ZEROPATH_TOKEN_ID", "token-id")
         monkeypatch.setenv("ZEROPATH_TOKEN_SECRET", "token-secret")
-        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "chatkit-token-value")
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
         monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
 
         with pytest.raises(OSError, match="Ambiguous credentials"):
@@ -457,9 +457,7 @@ class TestCallTool:
         assert payload["error"]["data"]["httpPath"] == "/api/v2/issues/search"
         assert payload["error"]["data"]["httpMethod"] == "POST"
 
-    def test_tool_result_with_error_field_is_not_treated_as_transport_error(
-        self, mock_server_v2, monkeypatch
-    ):
+    def test_tool_result_with_error_field_is_not_treated_as_transport_error(self, mock_server_v2, monkeypatch):
         import asyncio
 
         import mcp.types as types

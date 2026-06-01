@@ -19,7 +19,7 @@ JsonObject = dict[str, Any]
 
 DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
-CHATKIT_TOKEN_HEADER = "X-ZeroPath-ChatKit-Token"
+MCP_TOKEN_HEADER = "X-ZeroPath-MCP-Token"
 MAX_ERROR_BODY_CHARS = 2000
 MCP_ERROR_SENTINEL_KEY = "__zeropath_mcp_error__"
 
@@ -30,7 +30,7 @@ class ZeropathConfig:
     token_id: str | None
     token_secret: str | None
     session_cookie: str | None
-    chatkit_token: str | None
+    mcp_token: str | None
     organization_id: str | None
 
 
@@ -38,7 +38,7 @@ def load_config() -> ZeropathConfig:
     token_id = os.getenv("ZEROPATH_TOKEN_ID")
     token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
     session_cookie = os.getenv("ZEROPATH_SESSION_COOKIE")
-    chatkit_token = os.getenv("ZEROPATH_CHATKIT_TOKEN")
+    mcp_token = os.getenv("ZEROPATH_MCP_TOKEN")
     organization_id = os.getenv("ZEROPATH_ORG_ID")
     base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com")
 
@@ -47,18 +47,18 @@ def load_config() -> ZeropathConfig:
             "ZEROPATH_TOKEN_ID and ZEROPATH_TOKEN_SECRET must both be set when using API token authentication"
         )
 
-    auth_mode_count = int(bool(token_id and token_secret)) + int(bool(chatkit_token)) + int(bool(session_cookie))
+    auth_mode_count = int(bool(token_id and token_secret)) + int(bool(mcp_token)) + int(bool(session_cookie))
 
     if auth_mode_count == 0:
         raise OSError(
             "Missing required credentials: set either "
-            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_CHATKIT_TOKEN, "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN, "
             "or ZEROPATH_SESSION_COOKIE"
         )
     if auth_mode_count > 1:
         raise OSError(
             "Ambiguous credentials: configure exactly one auth mode among "
-            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_CHATKIT_TOKEN, "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN, "
             "or ZEROPATH_SESSION_COOKIE"
         )
 
@@ -67,7 +67,7 @@ def load_config() -> ZeropathConfig:
         token_id=token_id,
         token_secret=token_secret,
         session_cookie=session_cookie,
-        chatkit_token=chatkit_token,
+        mcp_token=mcp_token,
         organization_id=organization_id,
     )
 
@@ -226,8 +226,8 @@ class TrpcClient:
             headers["X-ZeroPath-API-Token-Id"] = self._config.token_id
             headers["X-ZeroPath-API-Token-Secret"] = self._config.token_secret
 
-        if self._config.chatkit_token:
-            headers[CHATKIT_TOKEN_HEADER] = self._config.chatkit_token
+        if self._config.mcp_token:
+            headers[MCP_TOKEN_HEADER] = self._config.mcp_token
 
         if self._config.session_cookie:
             headers["Cookie"] = self._config.session_cookie
