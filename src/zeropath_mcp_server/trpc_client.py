@@ -20,6 +20,7 @@ JsonObject = dict[str, Any]
 DEFAULT_TIMEOUT_SECONDS = 30
 CLIENT_HEADER_VALUE = "zeropath-mcp-server"
 MCP_TOKEN_HEADER = "X-ZeroPath-MCP-Token"
+LEGACY_CHATKIT_TOKEN_HEADER = "X-ZeroPath-ChatKit-Token"
 MAX_ERROR_BODY_CHARS = 2000
 MCP_ERROR_SENTINEL_KEY = "__zeropath_mcp_error__"
 
@@ -38,7 +39,7 @@ def load_config() -> ZeropathConfig:
     token_id = os.getenv("ZEROPATH_TOKEN_ID")
     token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
     session_cookie = os.getenv("ZEROPATH_SESSION_COOKIE")
-    mcp_token = os.getenv("ZEROPATH_MCP_TOKEN")
+    mcp_token = os.getenv("ZEROPATH_MCP_TOKEN") or os.getenv("ZEROPATH_CHATKIT_TOKEN")
     organization_id = os.getenv("ZEROPATH_ORG_ID")
     base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com")
 
@@ -52,13 +53,13 @@ def load_config() -> ZeropathConfig:
     if auth_mode_count == 0:
         raise OSError(
             "Missing required credentials: set either "
-            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN, "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN/ZEROPATH_CHATKIT_TOKEN, "
             "or ZEROPATH_SESSION_COOKIE"
         )
     if auth_mode_count > 1:
         raise OSError(
             "Ambiguous credentials: configure exactly one auth mode among "
-            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN, "
+            "ZEROPATH_TOKEN_ID+ZEROPATH_TOKEN_SECRET, ZEROPATH_MCP_TOKEN/ZEROPATH_CHATKIT_TOKEN, "
             "or ZEROPATH_SESSION_COOKIE"
         )
 
@@ -228,6 +229,7 @@ class TrpcClient:
 
         if self._config.mcp_token:
             headers[MCP_TOKEN_HEADER] = self._config.mcp_token
+            headers[LEGACY_CHATKIT_TOKEN_HEADER] = self._config.mcp_token
 
         if self._config.session_cookie:
             headers["Cookie"] = self._config.session_cookie

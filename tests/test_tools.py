@@ -269,6 +269,7 @@ class TestRestClient:
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
         monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
         monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
@@ -289,6 +290,34 @@ class TestRestClient:
 
         assert result == {"issues": [], "totalCount": 0}
         assert captured["headers"]["X-ZeroPath-MCP-Token"] == "mcp-token-value"
+        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "mcp-token-value"
+
+    def test_rest_post_accepts_legacy_chatkit_token_env(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "legacy-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        captured = {}
+
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["headers"] = headers
+            return DummyResponse({"issues": [], "totalCount": 0})
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
+        )
+
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["headers"]["X-ZeroPath-MCP-Token"] == "legacy-token-value"
+        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "legacy-token-value"
 
 
 class TestLoadConfig:
@@ -296,6 +325,7 @@ class TestLoadConfig:
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
         monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
         monkeypatch.setenv("ZEROPATH_SESSION_COOKIE", "zp_session=session-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
@@ -308,11 +338,25 @@ class TestLoadConfig:
         monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
         monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
         monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
         monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
         monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
 
         cfg = trpc_client.load_config()
         assert cfg.mcp_token == "mcp-token-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_accepts_legacy_chatkit_token_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "legacy-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.mcp_token == "legacy-token-value"
         assert cfg.token_id is None
         assert cfg.token_secret is None
 
