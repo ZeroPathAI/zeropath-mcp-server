@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned tool versions so local runs match CI. Keep in sync with pyproject.
+  RUFF_VERSION: "0.15.1"
+  PYRIGHT_VERSION: "1.1.411"
+
+jobs:
+  lint:
+    name: ruff (lint + format)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Ruff lint
+        run: uvx ruff@${{ env.RUFF_VERSION }} check --output-format=github .
+
+      - name: Ruff format check
+        run: uvx ruff@${{ env.RUFF_VERSION }} format --check --diff .
+
+  typecheck:
+    name: pyright
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      # Resolve project deps (--frozen: fail if uv.lock is stale) so pyright
+      # can see mcp/requests types, then add pyright to the ephemeral env.
+      - name: Run pyright
+        run: uv run --frozen --python 3.12 --with pyright==${{ env.PYRIGHT_VERSION }} pyright
+
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Run tests
+        run: uv run --frozen --python ${{ matrix.python-version }} pytest -v --tb=short
+
+  build:
+    name: build + verify package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      # On a version tag, the built version must match the tag (v0.2.0 -> 0.2.0).
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(uv run --frozen python -c 'import zeropath_mcp_server as z; print(z.__version__)')"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Release tag ($tag) does not match package version ($pkg)"
+            exit 1
+          fi
+
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Smoke-test the built wheel
+        run: |
+          uv run --isolated --no-project --with dist/*.whl \
+            python -c "import zeropath_mcp_server as z; print('import OK, version', z.__version__)"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  # Single required status: green only when every matrix leg + job above passed.
+  ci-ok:
+    name: CI passed
+    if: always()
+    needs: [lint, typecheck, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more CI jobs failed."
+            exit 1
+          fi
+          echo "All CI jobs passed."

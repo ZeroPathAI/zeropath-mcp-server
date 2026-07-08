@@ -69,6 +69,16 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 
+# Linting/formatting is enforced in CI with ruff (pinned in .github/workflows/ci.yml).
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pyright]
+# Type-checked in CI with pyright against the uv-resolved environment.
+include = ["src", "tests"]
+pythonVersion = "3.12"
+
 [dependency-groups]
 dev = [
     "pytest==9.0.2",
