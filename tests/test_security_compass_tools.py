@@ -16,8 +16,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from zeropath_mcp_server.sc_trpc_client import TrpcClient, UpstreamError
 from zeropath_mcp_server.security_compass import register_security_compass_tools
-from zeropath_mcp_server.trpc_client import TrpcClient, UpstreamError
 
 EXPECTED_TOOLS = {
     "security_compass_get_integration",

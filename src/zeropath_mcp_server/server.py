@@ -1,992 +1,391 @@
 """
 ZeroPath MCP Server
 
-Provides tools for interacting with ZeroPath security findings via the MCP protocol.
+Fetches the tool manifest from the ZeroPath frontend at startup and
+dynamically registers MCP tools. All input validation is delegated to
+the server-side Zod schemas — the manifest's JSON Schemas are used
+for tool advertisement and best-effort client-side validation. If a tool
+schema uses JSON Schema features this client does not support, the server
+will skip client-side validation for that request rather than validating
+incorrectly.
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
-import os
-import requests
+import re
+import sys
+from typing import Any
+
+import mcp.types as types
 from mcp.server.fastmcp import FastMCP
+from mcp.server.lowlevel import Server
 
-from .security_compass import register_security_compass_tools
-from .trpc_client import Config as TrpcConfig, TrpcClient
+from .jsonschema_validation import UnsupportedSchemaError
+from .jsonschema_validation import validate as validate_jsonschema
+from .sc_trpc_client import TrpcClient as SecurityCompassClient
+from .security_compass import SECURITY_COMPASS_TOOL_NAMES, register_security_compass_tools
+from .trpc_client import MCP_ERROR_SENTINEL_KEY, TrpcClient, load_config
 
-# Environment variables
-token_id = os.getenv("ZEROPATH_TOKEN_ID")
-token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
-org_id = os.getenv("ZEROPATH_ORG_ID")
+JsonObject = dict[str, Any]
 
-# Host of the ZeroPath deployment. Defaults to SaaS; enterprise or dedicated
-# tenants point this at their own host.
-base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com").rstrip("/")
+_CLIENT: TrpcClient | None = None
 
-# Base URL for the public REST v1 API
-API_BASE_URL = f"{base_url}/api/v1"
+_ALLOWED_ORG_ID_BEHAVIORS = {"inject-if-missing", "required", "none"}
 
 
-def make_api_request(endpoint, payload=None, include_org=True):
-    """Make authenticated API request to ZeroPath."""
-    if not token_id or not token_secret:
-        return None, "Error: Zeropath API credentials not found in environment variables"
+def _get_client() -> TrpcClient:
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = TrpcClient(load_config())
+    return _CLIENT
 
-    headers = {
-        "X-ZeroPath-API-Token-Id": token_id,
-        "X-ZeroPath-API-Token-Secret": token_secret,
-        "Content-Type": "application/json"
+
+def _build_security_compass_mcp() -> FastMCP:
+    """Register the Security Compass tools on a standalone FastMCP instance.
+
+    These tools are hardcoded client-side (not manifest-driven) because they
+    talk to ZeroPath's internal tRPC surface rather than the REST v2 API. The
+    instance is bridged onto the low-level server in create_server(). It reuses
+    the shared credentials via load_config() so every configured auth mode
+    works for the tRPC surface too.
+    """
+    sc_mcp = FastMCP("zeropath-security-compass")
+    register_security_compass_tools(sc_mcp, SecurityCompassClient(load_config()))
+    return sc_mcp
+
+
+def _schema_mentions_property(schema: Any, prop: str) -> bool:
+    """Best-effort check for property existence in a JSON Schema node."""
+    if isinstance(schema, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict) and prop in props:
+            return True
+        for v in schema.values():
+            if _schema_mentions_property(v, prop):
+                return True
+    elif isinstance(schema, list):
+        for v in schema:
+            if _schema_mentions_property(v, prop):
+                return True
+    return False
+
+
+def _apply_org_id(arguments: JsonObject, behavior: str, *, organization_id: str | None) -> str | None:
+    """Inject organizationId from config when appropriate.
+
+    When *organization_id* is None (ZEROPATH_ORG_ID not configured), injection
+    is skipped and server-side resolution is expected to handle it.
+
+    Returns an error message string on failure, otherwise None (success).
+    """
+    if behavior == "none":
+        return None
+
+    if not arguments.get("organizationId"):
+        # Only inject non-empty values. Treat empty string as "not configured".
+        if organization_id:
+            arguments["organizationId"] = organization_id
+        elif behavior == "required":
+            return (
+                "organizationId is required for this operation. Pass organizationId explicitly or set ZEROPATH_ORG_ID."
+            )
+
+    return None
+
+
+def _strip_org_id_from_schema(schema: JsonObject) -> JsonObject:
+    """Return a copy of the JSON Schema with the organizationId property removed.
+
+    This prevents the LLM from seeing organizationId as an input parameter,
+    since it's injected automatically from ZEROPATH_ORG_ID.
+    """
+    import copy
+
+    out = copy.deepcopy(schema)
+    props = out.get("properties")
+    if isinstance(props, dict):
+        props.pop("organizationId", None)
+    req = out.get("required")
+    if isinstance(req, list) and "organizationId" in req:
+        out["required"] = [r for r in req if r != "organizationId"]
+    # Handle allOf / anyOf / oneOf (composition keywords)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        variants = out.get(keyword)
+        if isinstance(variants, list):
+            out[keyword] = [_strip_org_id_from_schema(v) if isinstance(v, dict) else v for v in variants]
+    return out
+
+
+def _build_tools(manifest: JsonObject) -> tuple[list[types.Tool], dict[str, JsonObject]]:
+    """Parse the manifest into MCP Tool objects and a metadata lookup.
+
+    Supports manifest v2 only (httpMethod/httpPath). The metadata lookup
+    includes keys: httpMethod, httpPath, orgIdBehavior, inputSchema.
+    """
+    if not isinstance(manifest, dict):
+        raise RuntimeError("Invalid MCP manifest: top-level must be an object")
+
+    version = manifest.get("version")
+    if version != 2:
+        raise RuntimeError(f"Invalid MCP manifest: unsupported version {version!r} (expected 2)")
+
+    raw_tools = manifest.get("tools")
+    if not isinstance(raw_tools, list):
+        raise RuntimeError("Invalid MCP manifest: tools must be a list")
+
+    tools: list[types.Tool] = []
+    metadata: dict[str, JsonObject] = {}
+
+    for idx, entry in enumerate(raw_tools):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}] must be an object")
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].name must be a non-empty string")
+
+        # OpenAI's API requires tool names to match ^[a-zA-Z0-9_-]+$.
+        # The manifest uses operationIds like "issues.list" which contain dots.
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+        input_schema = entry.get("inputSchema")
+        if not isinstance(input_schema, dict):
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].inputSchema must be an object")
+
+        description = entry.get("description", "")
+        if not isinstance(description, str):
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].description must be a string")
+
+        org_id_behavior = entry.get("orgIdBehavior", "none")
+        if not isinstance(org_id_behavior, str) or org_id_behavior not in _ALLOWED_ORG_ID_BEHAVIORS:
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].orgIdBehavior must be one of {sorted(_ALLOWED_ORG_ID_BEHAVIORS)}"
+            )
+
+        http_method = entry.get("httpMethod")
+        if not isinstance(http_method, str) or not http_method.strip():
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpMethod must be a non-empty string")
+        http_method = http_method.upper()
+        if http_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpMethod must be a valid HTTP method")
+
+        http_path = entry.get("httpPath")
+        if not isinstance(http_path, str) or not http_path.strip():
+            raise RuntimeError(f"Invalid MCP manifest: tools[{idx}].httpPath must be a non-empty string")
+        if not http_path.startswith("/api/v2/"):
+            raise RuntimeError(
+                f"Invalid MCP manifest: tools[{idx}].httpPath must start with '/api/v2/' (got {http_path!r})"
+            )
+
+        if org_id_behavior != "none" and not _schema_mentions_property(input_schema, "organizationId"):
+            print(
+                f"Warning: tool {name!r} has orgIdBehavior={org_id_behavior!r} but inputSchema "
+                f"does not appear to mention organizationId",
+                file=sys.stderr,
+            )
+
+        if name in metadata:
+            raise RuntimeError(f"Invalid MCP manifest: duplicate tool name {name!r}")
+
+        # Strip organizationId from the schema the LLM sees — it's injected
+        # automatically by the MCP server from ZEROPATH_ORG_ID and should
+        # never be provided by the caller.
+        llm_schema = _strip_org_id_from_schema(input_schema) if org_id_behavior != "none" else input_schema
+
+        tools.append(
+            types.Tool(
+                name=name,
+                description=description,
+                inputSchema=llm_schema,
+            )
+        )
+        metadata[name] = {
+            "httpMethod": http_method,
+            "httpPath": http_path,
+            "orgIdBehavior": org_id_behavior,
+            "inputSchema": input_schema,  # Full schema (with orgId) for HTTP calls
+        }
+
+    return tools, metadata
+
+
+def _normalize_tool_error_payload(
+    result: JsonObject,
+    *,
+    tool_name: str,
+    http_method: str,
+    http_path: str,
+) -> JsonObject:
+    """Ensure tool errors always expose a non-empty string message + rich metadata."""
+    raw_error = result.get("error")
+    if not isinstance(raw_error, dict):
+        raw_error = {"message": raw_error}
+
+    raw_message = raw_error.get("message")
+    if isinstance(raw_message, str):
+        message = raw_message.strip()
+    else:
+        message = ""
+    if not message:
+        message = f"Tool {tool_name} failed"
+
+    normalized: JsonObject = {
+        "error": {
+            "code": str(raw_error.get("code") or "TOOL_ERROR"),
+            "message": message,
+        }
     }
 
-    if payload is None:
-        payload = {}
+    http_status = raw_error.get("httpStatus")
+    if http_status is not None:
+        normalized["error"]["httpStatus"] = http_status
 
-    if include_org and org_id:
-        payload["organizationId"] = org_id
+    data: JsonObject = {}
+    raw_data = raw_error.get("data")
+    if isinstance(raw_data, dict):
+        data.update(raw_data)
+    elif raw_data is not None:
+        data["rawData"] = raw_data
 
-    try:
-        response = requests.post(
-            f"{API_BASE_URL}/{endpoint}",
-            headers=headers,
-            json=payload
+    data.setdefault("tool", tool_name)
+    data.setdefault("httpMethod", http_method)
+    data.setdefault("httpPath", http_path)
+
+    if isinstance(raw_message, str) and not raw_message.strip():
+        data.setdefault("messageWasEmpty", True)
+    elif raw_message is not None and not isinstance(raw_message, str):
+        data.setdefault("rawMessage", raw_message)
+
+    normalized["error"]["data"] = data
+    return normalized
+
+
+def _is_tool_error_result(result: Any) -> bool:
+    """Return True when *result* is a client error envelope.
+
+    Successful API payloads can legitimately include an ``error`` field
+    (for example, ``issues.get`` response objects). To avoid false positives,
+    only treat values produced by ``make_error`` as transport errors.
+
+    Backward compatibility: accept legacy single-key ``{"error": ...}``
+    envelopes generated by older MCP server versions.
+    """
+    if not isinstance(result, dict):
+        return False
+
+    if result.get(MCP_ERROR_SENTINEL_KEY) is True and "error" in result:
+        return True
+
+    return "error" in result and set(result.keys()) <= {"error"}
+
+
+def create_server() -> Server:
+    """Create and return the MCP server with manifest-driven tools."""
+    client = _get_client()
+    manifest = client.fetch_manifest()
+    tools, metadata = _build_tools(manifest)
+
+    # Security Compass tools live alongside the manifest tools but are
+    # hardcoded and routed to the tRPC surface instead of the REST client.
+    sc_mcp = _build_security_compass_mcp()
+    collisions = {t.name for t in tools} & SECURITY_COMPASS_TOOL_NAMES
+    if collisions:
+        raise RuntimeError(
+            f"Manifest tool name(s) collide with Security Compass tools: {sorted(collisions)}"
         )
-        return response, None
-    except Exception as e:
-        return None, f"Error: {str(e)}"
 
+    server = Server("zeropath")
 
-def handle_response(response, error, success_processor=None):
-    """Handle API response with standard error checking."""
-    if error:
-        return error
+    # FastMCP.list_tools() is async; cache the resolved Tool objects on first
+    # use rather than calling asyncio.run() in this sync factory (which would
+    # fail once the server is running inside an event loop).
+    sc_tools_cache: list[types.Tool] = []
 
-    if response.status_code == 200:
-        if success_processor:
-            return success_processor(response.json())
-        return response.json()
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
+    @server.list_tools()
+    async def list_tools() -> list[types.Tool]:
+        if not sc_tools_cache:
+            sc_tools_cache.extend(await sc_mcp.list_tools())
+        return tools + sc_tools_cache
 
-# Check if required environment variables are set
-if not token_id or not token_secret or not org_id:
-    missing_vars = []
-    if not token_id:
-        missing_vars.append("ZEROPATH_TOKEN_ID")
-    if not token_secret:
-        missing_vars.append("ZEROPATH_TOKEN_SECRET")
-    if not org_id:
-        missing_vars.append("ZEROPATH_ORG_ID")
-    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.TextContent]:
+        if name in SECURITY_COMPASS_TOOL_NAMES:
+            return list(await sc_mcp.call_tool(name, dict(arguments or {})))
 
-mcp = FastMCP("Zeropath")
+        if name not in metadata:
+            raise RuntimeError(json.dumps({"error": {"code": "NOT_FOUND", "message": f"Unknown tool: {name}"}}))
 
-# =============================================================================
-# NOTE: This MCP server requires an admin/organization API key from ZeroPath.
-# Regular user API keys will not have access to most of these endpoints.
-# Generate an org API key at: https://zeropath.com/settings/api-keys
-# =============================================================================
+        meta = metadata[name]
+        args = dict(arguments or {})
 
-# =============================================================================
-# SECURITY COMPASS (SD ELEMENTS) INTEGRATION TOOLS
-# =============================================================================
-# These live in security_compass.py and talk to ZeroPath's tRPC surface
-# rather than the REST v1 API, using the same credentials.
-register_security_compass_tools(
-    mcp,
-    TrpcClient(
-        TrpcConfig(
-            base_url=base_url,
-            token_id=token_id,
-            token_secret=token_secret,
-            organization_id=org_id,
-        )
-    ),
-)
+        error = _apply_org_id(args, meta["orgIdBehavior"], organization_id=client.organization_id)
+        if error:
+            raise RuntimeError(json.dumps({"error": {"code": "BAD_REQUEST", "message": error}}))
 
-@mcp.tool()
-def search_vulnerabilities(search_query=None):
-    """
-    Search for vulnerabilities using the Zeropath API with a simple search query.
-    """
-    payload = {}
-    if search_query:
-        payload["searchQuery"] = search_query
-
-    response, error = make_api_request("issues/search", payload)
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_vulnerability_response(response.json())
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def get_issue(issue_id):
-    """
-    Get a specific vulnerability issue by its ID, including patch information if available.
-
-    Args:
-        issue_id (str): The ID of the issue to retrieve
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request("issues/get", {"issueId": issue_id})
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        raw_response = response.json()
-        if not raw_response:
-            return "Error: Empty response received from API"
-        return process_issue_response(raw_response)
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def approve_patch(issue_id):
-    """
-    Approve a patch for a specific vulnerability issue.
-
-    Args:
-        issue_id (str): The ID of the issue whose patch should be approved
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request("issues/approve-patch", {"issueId": issue_id})
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return "Patch approved successfully"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-# =============================================================================
-# BUG TRIAGE TOOLS
-# =============================================================================
-
-@mcp.tool()
-def mark_true_positive(issue_id: str) -> str:
-    """
-    Mark a security issue as a true positive (confirmed vulnerability).
-
-    Args:
-        issue_id: The ID of the issue to mark as true positive
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request(
-        "issues/mark-true-positive",
-        {"issueId": issue_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return f"Issue {issue_id} marked as true positive successfully"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def mark_false_positive(issue_id: str) -> str:
-    """
-    Mark a security issue as a false positive (not a real vulnerability).
-
-    Args:
-        issue_id: The ID of the issue to mark as false positive
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request(
-        "issues/mark-false-positive",
-        {"issueId": issue_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return f"Issue {issue_id} marked as false positive successfully"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def archive_issue(issue_id: str) -> str:
-    """
-    Archive a security issue to remove it from active view.
-
-    Args:
-        issue_id: The ID of the issue to archive
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request(
-        "issues/archive",
-        {"issueId": issue_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return f"Issue {issue_id} archived successfully"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def unarchive_issue(issue_id: str) -> str:
-    """
-    Unarchive a previously archived security issue to restore it to active view.
-
-    Args:
-        issue_id: The ID of the issue to unarchive
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request(
-        "issues/unarchive",
-        {"issueId": issue_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return f"Issue {issue_id} unarchived successfully"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def generate_patch(issue_id: str) -> str:
-    """
-    Generate an automated patch/fix for a security issue.
-
-    Args:
-        issue_id: The ID of the issue to generate a patch for
-    """
-    if not issue_id:
-        return "Error: Issue ID is required"
-
-    response, error = make_api_request(
-        "issues/generate-patch",
-        {"issueId": issue_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        result = response.json()
-        if result.get("patch"):
-            return f"Patch generated successfully for issue {issue_id}. Use get_issue({issue_id}) to view the patch details."
-        return f"Patch generation initiated for issue {issue_id}. This may take a moment."
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-# =============================================================================
-# SCAN MANAGEMENT TOOLS
-# =============================================================================
-
-@mcp.tool()
-def start_scan(repository_ids: list[str] = None) -> str:
-    """
-    Start a new security scan on one or more repositories.
-
-    Args:
-        repository_ids: List of repository IDs to scan
-    """
-    if not repository_ids:
-        return "Error: At least one repository ID is required"
-
-    # Handle case where repository_ids might be passed as a JSON string
-    if isinstance(repository_ids, str):
         try:
-            repository_ids = json.loads(repository_ids)
-        except json.JSONDecodeError:
-            # If it's a single ID as a string, wrap it in a list
-            repository_ids = [repository_ids]
-
-    response, error = make_api_request(
-        "scans/start",
-        {"repositoryIds": repository_ids}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        result = response.json()
-        scan_id = result.get("scanId", result.get("id", "unknown"))
-        return f"Scan started successfully. Scan ID: {scan_id}"
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def list_scans(
-    search_query: str = None,
-    repository_ids: list[str] = None,
-    scan_type: str = None,
-    page: int = 1,
-    page_size: int = 10
-) -> str:
-    """
-    List security scans with optional filtering and pagination.
-
-    Args:
-        search_query: Optional search term to filter scans
-        repository_ids: Optional list of repository IDs to filter by
-        scan_type: Optional scan type filter (FullScan, PrScan, SCAScan)
-        page: Page number (default: 1)
-        page_size: Number of results per page (default: 10)
-    """
-    payload = {
-        "page": page,
-        "pageSize": page_size
-    }
-
-    if search_query:
-        payload["searchQuery"] = search_query
-    if repository_ids:
-        payload["repositoryIds"] = repository_ids
-    if scan_type:
-        valid_types = ["FullScan", "PrScan", "SCAScan"]
-        if scan_type not in valid_types:
-            return f"Error: Invalid scan type. Must be one of: {', '.join(valid_types)}"
-        payload["scanType"] = scan_type
-
-    response, error = make_api_request("scans/list", payload)
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_scans_response(response.json())
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-def process_scans_response(raw_response):
-    """Process scans list response into readable format."""
-    if "error" in raw_response:
-        return f"Error: {raw_response['error']}"
-
-    scans = raw_response.get("scans", raw_response.get("items", []))
-    if not scans:
-        return "No scans found."
-
-    total_count = raw_response.get("totalCount", len(scans))
-    result = f"Found {total_count} scan(s).\n\n"
-
-    for i, scan in enumerate(scans, 1):
-        result += f"Scan {i}:\n"
-        result += f"  ID: {scan.get('id', 'N/A')}\n"
-        result += f"  Status: {scan.get('status', 'N/A')}\n"
-        result += f"  Type: {scan.get('scanType', 'N/A')}\n"
-        result += f"  Repository: {scan.get('repositoryName', scan.get('repositoryId', 'N/A'))}\n"
-        result += f"  Branch: {scan.get('branch', 'N/A')}\n"
-        result += f"  Created: {scan.get('createdAt', 'N/A')}\n"
-        result += f"  Updated: {scan.get('updatedAt', 'N/A')}\n"
-
-        # Issue counts if available
-        if scan.get('openIssues') is not None:
-            result += f"  Open Issues: {scan.get('openIssues', 0)}\n"
-        if scan.get('patchedIssues') is not None:
-            result += f"  Patched Issues: {scan.get('patchedIssues', 0)}\n"
-        if scan.get('falsePositiveIssues') is not None:
-            result += f"  False Positives: {scan.get('falsePositiveIssues', 0)}\n"
-
-        result += "\n"
-
-    # Pagination info
-    if "page" in raw_response or "currentPage" in raw_response:
-        result += f"Page: {raw_response.get('page', raw_response.get('currentPage', 1))}\n"
-        result += f"Page Size: {raw_response.get('pageSize', len(scans))}\n"
-
-    return result
-
-
-# =============================================================================
-# REPOSITORY MANAGEMENT TOOLS
-# =============================================================================
-
-@mcp.tool()
-def list_repositories(search_query: str = None) -> str:
-    """
-    List all repositories in the organization.
-
-    Args:
-        search_query: Optional search term to filter repositories
-    """
-    payload = {}
-    if search_query:
-        payload["searchQuery"] = search_query
-
-    response, error = make_api_request("repositories/list", payload)
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_repositories_response(response.json())
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-def process_repositories_response(raw_response):
-    """Process repositories list response into readable format."""
-    # Handle list response directly
-    if isinstance(raw_response, list):
-        repos = raw_response
-    else:
-        if "error" in raw_response:
-            return f"Error: {raw_response['error']}"
-        repos = raw_response.get("repositories", raw_response.get("items", []))
-
-    if not repos:
-        return "No repositories found."
-
-    total_count = len(repos)
-    result = f"Found {total_count} repository(ies).\n\n"
-
-    for i, repo in enumerate(repos, 1):
-        result += f"Repository {i}:\n"
-        result += f"  ID: {repo.get('id', 'N/A')}\n"
-        result += f"  Name: {repo.get('name', 'N/A')}\n"
-        result += f"  Full Name: {repo.get('fullName', repo.get('full_name', 'N/A'))}\n"
-        result += f"  Provider: {repo.get('provider', 'N/A')}\n"
-        result += f"  Default Branch: {repo.get('defaultBranch', repo.get('scanBranch', 'N/A'))}\n"
-        result += f"  PR Scanning: {repo.get('prScanningEnabled', 'N/A')}\n"
-        result += f"  Last Scanned: {repo.get('lastScannedAt', 'N/A')}\n"
-        result += "\n"
-
-    return result
-
-
-# =============================================================================
-# STATS & ANALYTICS TOOLS
-# =============================================================================
-
-@mcp.tool()
-def get_security_posture() -> str:
-    """
-    Get the overall security posture metrics for the organization.
-    Returns security score, vulnerability trends, and risk assessment.
-    """
-    response, error = make_api_request("stats/securityPosture")
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_stats_response(response.json(), "Security Posture")
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def get_issues_by_vuln_class() -> str:
-    """
-    Get issue statistics grouped by vulnerability class/type.
-    Shows distribution of vulnerabilities by category (XSS, SQLi, etc.).
-    """
-    response, error = make_api_request("stats/issuesByVulnClass")
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_stats_response(response.json(), "Issues by Vulnerability Class")
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def get_summary_statistics() -> str:
-    """
-    Get aggregated summary statistics across the organization.
-    Includes total issues, patches, repositories, and key metrics.
-    """
-    response, error = make_api_request("stats/summary")
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_stats_response(response.json(), "Summary Statistics")
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-def process_stats_response(raw_response, title):
-    """Process stats response into readable format."""
-    # Handle list response directly
-    if isinstance(raw_response, list):
-        result = f"=== {title} ===\n\n"
-        for i, item in enumerate(raw_response, 1):
-            if isinstance(item, dict):
-                result += f"Item {i}:\n"
-                for k, v in item.items():
-                    formatted_key = ''.join(' ' + c if c.isupper() else c for c in str(k)).strip().title()
-                    result += f"  {formatted_key}: {v}\n"
-                result += "\n"
-            else:
-                result += f"  - {item}\n"
-        return result
-
-    if isinstance(raw_response, dict) and "error" in raw_response:
-        return f"Error: {raw_response['error']}"
-
-    result = f"=== {title} ===\n\n"
-
-    def format_value(key, value, indent=0):
-        """Format a key-value pair with proper indentation."""
-        prefix = "  " * indent
-        if isinstance(value, dict):
-            output = f"{prefix}{key}:\n"
-            for k, v in value.items():
-                output += format_value(k, v, indent + 1)
-            return output
-        elif isinstance(value, list):
-            output = f"{prefix}{key}:\n"
-            for i, item in enumerate(value):
-                if isinstance(item, dict):
-                    output += f"{prefix}  Item {i + 1}:\n"
-                    for k, v in item.items():
-                        output += format_value(k, v, indent + 2)
-                else:
-                    output += f"{prefix}  - {item}\n"
-            return output
-        else:
-            # Format the key nicely (camelCase to Title Case)
-            formatted_key = ''.join(' ' + c if c.isupper() else c for c in key).strip().title()
-            return f"{prefix}{formatted_key}: {value}\n"
-
-    for key, value in raw_response.items():
-        result += format_value(key, value)
-
-    return result
-
-
-# =============================================================================
-# SCA (SOFTWARE COMPOSITION ANALYSIS) TOOLS
-# =============================================================================
-
-@mcp.tool()
-def list_sca_vulnerabilities(
-    search_query: str = None,
-    repository_ids: list[str] = None,
-    ecosystems: list[str] = None,
-    transitivity: str = None,
-    page: int = 1,
-    page_size: int = 50
-) -> str:
-    """
-    Search for SCA (Software Composition Analysis) vulnerabilities in dependencies.
-
-    Args:
-        search_query: Optional search term to filter vulnerabilities
-        repository_ids: Optional list of repository IDs to filter by
-        ecosystems: Optional list of ecosystems to filter (npm, pip, maven, etc.)
-        transitivity: Optional filter by dependency type (direct, transitive)
-        page: Page number (default: 1)
-        page_size: Number of results per page (default: 50)
-    """
-    payload = {
-        "page": page,
-        "pageSize": page_size
-    }
-
-    if search_query:
-        payload["searchQuery"] = search_query
-    if repository_ids:
-        payload["repositoryIds"] = repository_ids
-    if ecosystems:
-        payload["ecosystems"] = ecosystems
-    if transitivity:
-        if transitivity not in ["direct", "transitive"]:
-            return "Error: transitivity must be 'direct' or 'transitive'"
-        payload["transitivity"] = transitivity
-
-    response, error = make_api_request("sca/vulnerabilities/search", payload)
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        return process_sca_vulnerabilities_response(response.json())
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def get_sca_vulnerability(vulnerability_id: str) -> str:
-    """
-    Get detailed information about a specific SCA vulnerability.
-
-    Args:
-        vulnerability_id: The ID of the vulnerability to retrieve
-    """
-    if not vulnerability_id:
-        return "Error: Vulnerability ID is required"
-
-    response, error = make_api_request(
-        "sca/vulnerabilities/get",
-        {"id": vulnerability_id}
-    )
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        vuln = response.json()
-
-        output = "SCA Vulnerability Details:\n\n"
-        output += f"ID: {vuln.get('id', 'N/A')}\n"
-        output += f"Package: {vuln.get('packageName', 'N/A')}\n"
-        output += f"Version: {vuln.get('version', 'N/A')}\n"
-        output += f"Ecosystem: {vuln.get('ecosystem', 'N/A')}\n"
-        output += f"Severity: {vuln.get('severity', 'N/A')}\n"
-        output += f"CVSS Score: {vuln.get('cvssScore', vuln.get('severityScore', 'N/A'))}\n"
-
-        # Advisory info
-        if vuln.get('aliases'):
-            output += f"Aliases: {', '.join(vuln['aliases'])}\n"
-        if vuln.get('cve'):
-            output += f"CVE: {vuln['cve']}\n"
-
-        output += f"\nSummary: {vuln.get('summary', 'N/A')}\n"
-        output += f"\nDescription: {vuln.get('description', 'N/A')}\n"
-
-        # Fix info
-        if vuln.get('fixedVersion'):
-            output += f"\nFixed in Version: {vuln['fixedVersion']}\n"
-        if vuln.get('references'):
-            output += "\nReferences:\n"
-            for ref in vuln['references'][:5]:  # Limit to 5 references
-                output += f"  - {ref}\n"
-
-        return output
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-@mcp.tool()
-def list_sca_repositories() -> str:
-    """
-    List repositories with their aggregated dependency inventory information.
-    Shows which repositories have been analyzed for dependencies.
-    """
-    response, error = make_api_request("sca/repositories/search")
-
-    if error:
-        return error
-
-    if response.status_code == 200:
-        result = response.json()
-        repos = result.get("repositories", result if isinstance(result, list) else [])
-
-        if not repos:
-            return "No repositories with SCA data found."
-
-        output = f"Found {len(repos)} repository(ies) with SCA data:\n\n"
-        for i, repo in enumerate(repos, 1):
-            output += f"Repository {i}:\n"
-            output += f"  ID: {repo.get('id', repo.get('repositoryId', 'N/A'))}\n"
-            output += f"  Name: {repo.get('name', repo.get('repositoryName', 'N/A'))}\n"
-            output += f"  Total Dependencies: {repo.get('totalDependencies', repo.get('dependencyCount', 'N/A'))}\n"
-            output += f"  Vulnerable Packages: {repo.get('vulnerablePackages', 'N/A')}\n"
-            output += f"  Critical: {repo.get('criticalCount', 'N/A')}\n"
-            output += f"  High: {repo.get('highCount', 'N/A')}\n"
-            output += f"  Medium: {repo.get('mediumCount', 'N/A')}\n"
-            output += f"  Low: {repo.get('lowCount', 'N/A')}\n"
-            output += "\n"
-        return output
-    elif response.status_code == 401:
-        return "Error: Unauthorized - check API credentials"
-    elif response.status_code == 400:
-        return f"Error: Bad request - {response.text}"
-    else:
-        return f"Error: API returned status {response.status_code}: {response.text}"
-
-
-def process_sca_vulnerabilities_response(raw_response):
-    """Process SCA vulnerabilities search response into readable format."""
-    if "error" in raw_response:
-        return f"Error: {raw_response['error']}"
-
-    vulns = raw_response.get("vulnerabilities", raw_response.get("items", []))
-    if not vulns:
-        return "No SCA vulnerabilities found."
-
-    total_count = raw_response.get("totalCount", len(vulns))
-    result = f"Found {total_count} SCA vulnerability(ies).\n\n"
-
-    for i, vuln in enumerate(vulns, 1):
-        result += f"Vulnerability {i}:\n"
-        result += f"  ID: {vuln.get('id', 'N/A')}\n"
-
-        # Package info
-        pkg = vuln.get('package', {})
-        if pkg:
-            result += f"  Package: {pkg.get('name', 'N/A')} @ {pkg.get('version', 'N/A')}\n"
-            result += f"  Ecosystem: {pkg.get('ecosystem', 'N/A')}\n"
-            result += f"  Manifest: {pkg.get('manifestPath', 'N/A')}\n"
-        else:
-            result += f"  Package: {vuln.get('packageName', 'N/A')}\n"
-
-        # Metadata
-        meta = vuln.get('metadata', {})
-        if meta:
-            result += f"  Severity: {meta.get('severity', 'N/A')}\n"
-            result += f"  Score: {meta.get('severityScore', 'N/A')}\n"
-            result += f"  Summary: {meta.get('summary', 'N/A')}\n"
-            if meta.get('aliases'):
-                result += f"  Aliases: {', '.join(meta['aliases'][:3])}\n"
-        else:
-            result += f"  Severity: {vuln.get('severity', 'N/A')}\n"
-
-        result += f"  Repository: {vuln.get('repositoryId', 'N/A')}\n"
-        result += f"  Branch: {vuln.get('branch', 'N/A')}\n"
-        result += "\n"
-
-    # Pagination info
-    if "page" in raw_response:
-        result += f"Page: {raw_response.get('page', 1)} | "
-        result += f"Page Size: {raw_response.get('pageSize', len(vulns))} | "
-        result += f"Total: {total_count}\n"
-
-    return result
-
-
-def process_issue_response(issue):
-    """
-    Process a single issue response into a readable format, focusing on the issue details and patch.
-    """
-    if not issue:
-        return "Error: Empty issue data"
-
-    if "error" in issue and issue["error"]:
-        return f"Error: {issue['error']}"
-
-    # Check if we have a valid issue (must have an id at minimum)
-    if not issue.get('id'):
-        return "Error: Invalid issue data received - missing ID"
-
-    # Get patch information if available
-    patch = issue.get("patch") or issue.get("vulnerabilityPatch")
-
-    result = "Issue Details:\n"
-
-    result += f"ID: {issue.get('id', 'N/A')}\n"
-    result += f"Status: {issue.get('status', 'N/A')}\n"
-    result += f"Title: {issue.get('generatedTitle', 'N/A')}\n"
-    result += f"Description: {issue.get('generatedDescription', 'N/A')}\n"
-    result += f"Language: {issue.get('language', 'N/A')}\n"
-    result += f"Vulnerability Class: {issue.get('vulnClass', 'N/A')}\n"
-
-    if issue.get("cwes"):
-        result += f"CWEs: {', '.join(issue.get('cwes', []))}\n"
-
-    result += f"Severity: {issue.get('severity', 'N/A')}\n"
-    result += f"Affected File: {issue.get('affectedFile', 'N/A')}\n"
-
-    if issue.get("startLine") and issue.get("endLine"):
-        result += f"Location: Lines {issue.get('startLine')} to {issue.get('endLine')}\n"
-
-    result += f"Validation Status: {issue.get('validated', 'N/A')}\n"
-    result += f"Unpatchable: {issue.get('unpatchable', False)}\n"
-    result += f"Triage Phase: {issue.get('triagePhase', 'N/A')}\n"
-
-    # Add code segment if available
-    if issue.get("sastCodeSegment"):
-        result += "\nVulnerable Code Segment:\n"
-        result += f"```\n{issue.get('sastCodeSegment')}\n```\n"
-
-    # Add patch information if available
-    if patch and not issue.get("unpatchable", False):
-        result += "\n========== PATCH INFORMATION ==========\n"
-        result += f"PR Link: {patch.get('prLink', 'N/A')}\n"
-        result += f"PR Title: {patch.get('prTitle', 'N/A')}\n"
-        result += f"PR Description: {patch.get('prDescription', 'N/A')}\n"
-        result += f"PR Status: {patch.get('pullRequestStatus', 'N/A')}\n"
-        result += f"Validation Status: {patch.get('validated', 'N/A')}\n"
-        result += f"Created At: {patch.get('createdAt', 'N/A')}\n"
-        result += f"Updated At: {patch.get('updatedAt', 'N/A')}\n"
-
-        # Add git diff if available
-        if patch.get("gitDiff"):
-            result += "\n========== PATCH ID & GIT DIFF ==========\n"
-            result += f"PATCH ID: {patch.get('id', 'N/A')}\n"
-            result += "========================================\n"
-            result += "Git Diff:\n"
-            result += f"```diff\n{patch.get('gitDiff')}\n```\n"
-
-    return result
-
-def process_vulnerability_response(raw_response):
-    """
-    Process the raw API response into a more readable format for LLMs.
-    Extracts and organizes the most relevant information in plain text format.
-    """
-    if "error" in raw_response:
-        return f"Error: {raw_response['error']}"
-
-    if "issues" not in raw_response:
-        return "No vulnerability issues found in the response."
-
-    # Count totals and categorize issues
-    total_issues = len(raw_response["issues"])
-    patchable_count = sum(1 for issue in raw_response["issues"] if not issue.get("unpatchable", False))
-    unpatchable_count = sum(1 for issue in raw_response["issues"] if issue.get("unpatchable", True))
-
-    # Build a formatted text response
-    result = f"Found {total_issues} vulnerability issues. {patchable_count} are patchable, {unpatchable_count} are unpatchable.\n\n"
-
-    # Process each issue
-    for i, issue in enumerate(raw_response["issues"], 1):
-        result += f"Issue {i}:\n"
-        result += f"ID: {issue.get('id')}\n"
-        result += f"Status: {issue.get('status', 'unknown')}\n"
-
-        # Include all fields that exist
-        if issue.get("type"):
-            result += f"Type: {issue.get('type')}\n"
-
-        if issue.get("patchable") is not None:
-            patchable = not issue.get("unpatchable", False)
-            result += f"Patchable: {patchable}\n"
-
-        if issue.get("language"):
-            result += f"Language: {issue['language']}\n"
-
-        if issue.get("score") is not None:
-            result += f"Score: {issue['score']}\n"
-
-        if issue.get("severity") is not None:
-            result += f"Severity: {issue['severity']}\n"
-
-        if issue.get("generatedTitle"):
-            result += f"Title: {issue['generatedTitle']}\n"
-
-        if issue.get("generatedDescription"):
-            result += f"Description: {issue['generatedDescription']}\n"
-
-        if issue.get("affectedFile"):
-            result += f"Affected File: {issue['affectedFile']}\n"
-
-        if issue.get("cwes"):
-            result += f"CWEs: {', '.join(issue['cwes'])}\n"
-
-        if issue.get("validated"):
-            result += f"Validation Status: {issue['validated']}\n"
-
-        if issue.get("triagePhase"):
-            result += f"Triage Phase: {issue['triagePhase']}\n"
-
-        # Add patch information if available
-        if issue.get("vulnerabilityPatch") and not issue.get("unpatchable", False):
-            patch = issue["vulnerabilityPatch"]
-            result += "\n--- PATCH INFORMATION ---\n"
-            result += f"PATCH ID: {patch.get('id', 'N/A')}\n"
-            result += "------------------------\n"
-            result += "Has Patch: Yes\n"
-
-            if patch.get("pullRequestStatus"):
-                result += f"Patch Status: {patch['pullRequestStatus']}\n"
-
-        # Add extra space between issues
-        result += "\n"
-
-    # Include pagination info if available
-    if "currentPage" in raw_response or "pageSize" in raw_response:
-        result += "Pagination Info:\n"
-        result += f"Current Page: {raw_response.get('currentPage', 1)}\n"
-        result += f"Page Size: {raw_response.get('pageSize', total_issues)}\n"
-
-    return result
+            issues = validate_jsonschema(args, meta["inputSchema"], root_schema=manifest)
+        except UnsupportedSchemaError as exc:
+            # Best-effort validation: don't reject calls due to missing client support
+            # for a schema feature; the server-side Zod schema remains authoritative.
+            print(
+                f"Warning: skipping client-side validation for tool {name!r}: {exc}",
+                file=sys.stderr,
+            )
+            issues = []
+
+        if issues:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "BAD_REQUEST",
+                            "message": "Input validation failed",
+                            "data": {"issues": [i.to_dict() for i in issues]},
+                        }
+                    }
+                )
+            )
+
+        try:
+            result = await asyncio.to_thread(
+                client.call,
+                meta["httpPath"],
+                args,
+                http_method=meta["httpMethod"],
+            )
+        except Exception as exc:
+            detail = str(exc).strip() or repr(exc)
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "INTERNAL_ERROR",
+                            "message": f"Failed to invoke ZeroPath API for tool {name}",
+                            "data": {
+                                "tool": name,
+                                "httpMethod": meta["httpMethod"],
+                                "httpPath": meta["httpPath"],
+                                "exceptionType": type(exc).__name__,
+                                "detail": detail,
+                            },
+                        }
+                    }
+                )
+            ) from exc
+
+        if _is_tool_error_result(result):
+            raise RuntimeError(
+                json.dumps(
+                    _normalize_tool_error_payload(
+                        result,
+                        tool_name=name,
+                        http_method=meta["httpMethod"],
+                        http_path=meta["httpPath"],
+                    )
+                )
+            )
+        return [types.TextContent(type="text", text=json.dumps(result))]
+
+    return server

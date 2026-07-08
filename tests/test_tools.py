@@ -1,251 +1,609 @@
 """
-Tests for ZeroPath MCP Server Tools
+Tests for ZeroPath MCP Server (manifest-driven).
 
 Run with: uv run pytest tests/test_tools.py -v
 """
 
 import os
+
+# Ensure required environment variables exist before importing the server module.
+os.environ.setdefault("ZEROPATH_TOKEN_ID", "test-token-id")
+os.environ.setdefault("ZEROPATH_TOKEN_SECRET", "test-token-secret")
+os.environ.setdefault("ZEROPATH_ORG_ID", "org_test")
+os.environ.setdefault("ZEROPATH_BASE_URL", "https://example.com")
+
+import json
+
 import pytest
+import zeropath_mcp_server.trpc_client as trpc_client
+from zeropath_mcp_server import server
+from zeropath_mcp_server.jsonschema_validation import validate as validate_jsonschema
 
-# Check for required environment variables before importing
-REQUIRED_VARS = ["ZEROPATH_TOKEN_ID", "ZEROPATH_TOKEN_SECRET", "ZEROPATH_ORG_ID"]
-missing_vars = [var for var in REQUIRED_VARS if not os.getenv(var)]
+SAMPLE_MANIFEST_V2 = {
+    "version": 2,
+    "generatedAt": "2026-01-01T00:00:00.000Z",
+    "tools": [
+        {
+            "name": "issues.list",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/issues/search",
+            "description": "List security issues",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "organizationId": {"type": "string"},
+                    "page": {"type": "integer"},
+                },
+            },
+            "orgIdBehavior": "inject-if-missing",
+        },
+        {
+            "name": "stats.assets",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/stats/assets",
+            "description": "Get asset stats",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "organizationId": {"type": "string"},
+                },
+                "required": ["organizationId"],
+            },
+            "orgIdBehavior": "required",
+        },
+        {
+            "name": "rules.get",
+            "httpMethod": "POST",
+            "httpPath": "/api/v2/rules/get",
+            "description": "Get a rule",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ruleId": {"type": "string"},
+                },
+                "required": ["ruleId"],
+            },
+            "orgIdBehavior": "none",
+        },
+    ],
+}
 
-if missing_vars:
-    pytest.skip(
-        f"Missing required environment variables: {', '.join(missing_vars)}",
-        allow_module_level=True
-    )
-
-from zeropath_mcp_server.server import (
-    # Original tools
-    search_vulnerabilities,
-    get_issue,
-    approve_patch,
-    # Bug triage tools
-    mark_true_positive,
-    mark_false_positive,
-    archive_issue,
-    unarchive_issue,
-    generate_patch,
-    # Scan tools
-    start_scan,
-    list_scans,
-    # Repository tools
-    list_repositories,
-    # Stats tools
-    get_security_posture,
-    get_issues_by_vuln_class,
-    get_summary_statistics,
-    # SCA tools
-    list_sca_vulnerabilities,
-    get_sca_vulnerability,
-    list_sca_repositories,
-)
-
-
-class TestOriginalTools:
-    """Tests for the original 3 tools."""
-
-    def test_search_vulnerabilities_no_query(self):
-        """Test searching vulnerabilities without a query."""
-        result = search_vulnerabilities()
-        assert result is not None
-        assert "Error: Unauthorized" not in result or "Found" in result or "No vulnerability" in result
-
-    def test_search_vulnerabilities_with_query(self):
-        """Test searching vulnerabilities with a query."""
-        result = search_vulnerabilities(search_query="XSS")
-        assert result is not None
-        assert isinstance(result, str)
-
-    def test_get_issue_missing_id(self):
-        """Test get_issue with missing ID."""
-        result = get_issue("")
-        assert "Error" in result
-
-    def test_get_issue_invalid_id(self):
-        """Test get_issue with invalid ID."""
-        result = get_issue("invalid-id-12345")
-        assert result is not None  # Should return error or empty
-
-    def test_approve_patch_missing_id(self):
-        """Test approve_patch with missing ID."""
-        result = approve_patch("")
-        assert "Error" in result
+REF_ROOT_SCHEMA = {
+    "definitions": {
+        "IssuesListInput": {
+            "type": "object",
+            "properties": {
+                "organizationId": {"type": "string"},
+                "page": {"type": "integer"},
+            },
+            "required": ["page"],
+        }
+    }
+}
 
 
-class TestBugTriageTools:
-    """Tests for bug triage tools."""
+class TestBuildTools:
+    """Test _build_tools with v2 manifest format."""
 
-    def test_mark_true_positive_missing_id(self):
-        """Test mark_true_positive with missing ID."""
-        result = mark_true_positive("")
-        assert "Error" in result
+    def test_rejects_v1(self):
+        with pytest.raises(RuntimeError, match="expected 2"):
+            server._build_tools({"version": 1, "tools": []})
 
-    def test_mark_false_positive_missing_id(self):
-        """Test mark_false_positive with missing ID."""
-        result = mark_false_positive("")
-        assert "Error" in result
+    def test_parses_tools_from_manifest(self):
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-    def test_archive_issue_missing_id(self):
-        """Test archive_issue with missing ID."""
-        result = archive_issue("")
-        assert "Error" in result
+        assert len(tools) == 3
+        assert tools[0].name == "issues_list"
+        assert tools[0].description == "List security issues"
 
-    def test_unarchive_issue_missing_id(self):
-        """Test unarchive_issue with missing ID."""
-        result = unarchive_issue("")
-        assert "Error" in result
+    def test_preserves_http_metadata(self):
+        _, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
 
-    def test_generate_patch_missing_id(self):
-        """Test generate_patch with missing ID."""
-        result = generate_patch("")
-        assert "Error" in result
+        assert metadata["issues_list"]["httpMethod"] == "POST"
+        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues_list"]["orgIdBehavior"] == "inject-if-missing"
 
+        assert metadata["stats_assets"]["httpMethod"] == "POST"
+        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
 
-class TestScanTools:
-    """Tests for scan management tools."""
+        assert metadata["rules_get"]["httpMethod"] == "POST"
+        assert metadata["rules_get"]["httpPath"] == "/api/v2/rules/get"
 
-    def test_start_scan_missing_repos(self):
-        """Test start_scan with missing repository IDs."""
-        result = start_scan([])
-        assert "Error" in result
-
-    def test_list_scans_default(self):
-        """Test list_scans with default parameters."""
-        result = list_scans()
-        assert result is not None
-        assert isinstance(result, str)
-        # Should return either scans or "No scans found"
-        assert "scan" in result.lower() or "error" in result.lower()
-
-    def test_list_scans_with_pagination(self):
-        """Test list_scans with pagination."""
-        result = list_scans(page=1, page_size=5)
-        assert result is not None
-
-    def test_list_scans_invalid_type(self):
-        """Test list_scans with invalid scan type."""
-        result = list_scans(scan_type="InvalidType")
-        assert "Error" in result
+    def test_empty_manifest(self):
+        tools, metadata = server._build_tools({"version": 2, "tools": []})
+        assert tools == []
+        assert metadata == {}
 
 
-class TestRepositoryTools:
-    """Tests for repository tools."""
-
-    def test_list_repositories_default(self):
-        """Test list_repositories with default parameters."""
-        result = list_repositories()
-        assert result is not None
-        assert isinstance(result, str)
-        # Should return repositories or "No repositories found"
-        assert "repository" in result.lower() or "repo" in result.lower() or "error" in result.lower()
-
-    def test_list_repositories_with_search(self):
-        """Test list_repositories with search query."""
-        result = list_repositories(search_query="test")
-        assert result is not None
+class TestJsonschemaValidation:
+    def test_ref_resolution_uses_root_schema_when_provided(self):
+        schema = {"$ref": "#/definitions/IssuesListInput"}
+        issues = validate_jsonschema({"organizationId": "org_test"}, schema, root_schema=REF_ROOT_SCHEMA)
+        assert any(i.path == "page" and "Missing required" in i.message for i in issues)
 
 
-class TestStatsTools:
-    """Tests for stats and analytics tools."""
+class TestApplyOrgId:
+    def test_inject_if_missing_adds_org_id(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_test"
 
-    def test_get_security_posture(self):
-        """Test get_security_posture."""
-        result = get_security_posture()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_inject_if_missing_preserves_existing(self):
+        args = {"organizationId": "org_custom", "page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_custom"
 
-    def test_get_issues_by_vuln_class(self):
-        """Test get_issues_by_vuln_class."""
-        result = get_issues_by_vuln_class()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_required_injects_from_config(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id="org_test")
+        assert error is None
+        assert args["organizationId"] == "org_test"
 
-    def test_get_summary_statistics(self):
-        """Test get_summary_statistics."""
-        result = get_summary_statistics()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_required_errors_when_config_empty(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id="")
+        assert error is not None
+        assert "organizationId is required" in error
 
+    def test_inject_if_missing_skips_when_org_id_none(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "inject-if-missing", organization_id=None)
+        assert error is None
+        assert "organizationId" not in args
 
-class TestSCATools:
-    """Tests for SCA (Software Composition Analysis) tools."""
+    def test_required_errors_when_org_id_none(self):
+        args = {}
+        error = server._apply_org_id(args, "required", organization_id=None)
+        assert error is not None
+        assert "organizationId is required" in error
+        assert "organizationId" not in args
 
-    def test_list_sca_vulnerabilities_default(self):
-        """Test list_sca_vulnerabilities with default parameters."""
-        result = list_sca_vulnerabilities()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_required_preserves_existing(self):
+        args = {"organizationId": "org_custom"}
+        error = server._apply_org_id(args, "required", organization_id=None)
+        assert error is None
+        assert args["organizationId"] == "org_custom"
 
-    def test_list_sca_vulnerabilities_with_pagination(self):
-        """Test list_sca_vulnerabilities with pagination."""
-        result = list_sca_vulnerabilities(page=1, page_size=10)
-        assert result is not None
-
-    def test_list_sca_vulnerabilities_invalid_transitivity(self):
-        """Test list_sca_vulnerabilities with invalid transitivity."""
-        result = list_sca_vulnerabilities(transitivity="invalid")
-        assert "Error" in result
-
-    def test_get_sca_vulnerability_missing_id(self):
-        """Test get_sca_vulnerability with missing ID."""
-        result = get_sca_vulnerability("")
-        assert "Error" in result
-
-    def test_list_sca_repositories(self):
-        """Test list_sca_repositories."""
-        result = list_sca_repositories()
-        assert result is not None
-        assert isinstance(result, str)
+    def test_none_skips_injection(self):
+        args = {"page": 1}
+        error = server._apply_org_id(args, "none", organization_id="org_test")
+        assert error is None
+        assert "organizationId" not in args
 
 
-class TestIntegration:
-    """Integration tests that test tool workflows."""
+class DummyResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
 
-    def test_search_and_get_issue_workflow(self):
-        """Test searching for issues and then getting details."""
-        # First search for vulnerabilities
-        search_result = search_vulnerabilities()
-        assert search_result is not None
-
-        # If we found issues, try to get the first one
-        if "ID:" in search_result and "Error" not in search_result:
-            # Extract first issue ID (basic parsing)
-            lines = search_result.split("\n")
-            for line in lines:
-                if line.startswith("ID:"):
-                    issue_id = line.replace("ID:", "").strip()
-                    if issue_id and issue_id != "N/A":
-                        # Get issue details
-                        issue_result = get_issue(issue_id)
-                        assert issue_result is not None
-                        break
-
-    def test_list_repos_and_scan_workflow(self):
-        """Test listing repos and checking scans."""
-        # List repositories
-        repos_result = list_repositories()
-        assert repos_result is not None
-
-        # List recent scans
-        scans_result = list_scans()
-        assert scans_result is not None
+    def json(self):
+        return self._payload
 
 
-# Quick smoke test that can be run independently
-def test_smoke():
-    """Quick smoke test to verify basic connectivity."""
-    # Just test that we can call a simple read-only endpoint
-    result = list_repositories()
-    assert result is not None
-    print(f"\nSmoke test result:\n{result[:500]}...")
+class TestRestClient:
+    """Test TrpcClient calling REST endpoints (v2 manifest pattern)."""
+
+    def test_rest_post_builds_url_and_headers(self, monkeypatch):
+        captured = {}
+
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return DummyResponse({"issues": [], "totalCount": 0})
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
+        )
+
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["method"] == "POST"
+        assert captured["url"] == "https://example.com/api/v2/issues/search"
+        assert captured["headers"]["X-ZeroPath-API-Token-Id"] == "test-token-id"
+        assert captured["headers"]["X-ZeroPath-API-Token-Secret"] == "test-token-secret"
+        assert captured["headers"]["X-ZeroPath-Client"] == "zeropath-mcp-server"
+        assert captured["json"]["organizationId"] == "org_test"
+
+    def test_rest_error_returns_error_dict(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse({"error": "Unauthorized"}, status_code=401)
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/repositories/list",
+            {},
+            http_method="POST",
+        )
+        assert "error" in result
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
+        assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "Unauthorized"
+        assert result["error"]["httpStatus"] == 401
+
+    def test_rest_error_with_nested_message_is_extracted(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse(
+                {"error": {"message": "JWT expired", "code": "UNAUTHORIZED", "requestId": "req_123"}},
+                status_code=401,
+            )
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call("/api/v2/issues/search", {}, http_method="POST")
+
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
+        assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "JWT expired"
+        assert result["error"]["httpStatus"] == 401
+        assert result["error"]["data"]["apiCode"] == "UNAUTHORIZED"
+        assert result["error"]["data"]["requestId"] == "req_123"
+
+    def test_rest_error_empty_message_falls_back_to_http_status(self, monkeypatch):
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            return DummyResponse({"error": ""}, status_code=500)
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call("/api/v2/issues/search", {}, http_method="POST")
+
+        assert result[trpc_client.MCP_ERROR_SENTINEL_KEY] is True
+        assert result["error"]["code"] == "API_ERROR"
+        assert result["error"]["message"] == "ZeroPath API returned HTTP 500"
+        assert result["error"]["httpStatus"] == 500
+        assert result["error"]["data"]["emptyErrorField"] is True
+
+    def test_rest_post_includes_mcp_token_header(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        captured = {}
+
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["headers"] = headers
+            return DummyResponse({"issues": [], "totalCount": 0})
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
+        )
+
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["headers"]["X-ZeroPath-MCP-Token"] == "mcp-token-value"
+        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "mcp-token-value"
+
+    def test_rest_post_accepts_legacy_chatkit_token_env(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "legacy-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        captured = {}
+
+        def fake_request(method, url, headers=None, json=None, timeout=None):
+            captured["headers"] = headers
+            return DummyResponse({"issues": [], "totalCount": 0})
+
+        monkeypatch.setattr(trpc_client.requests, "request", fake_request)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.call(
+            "/api/v2/issues/search",
+            {"organizationId": "org_test"},
+            http_method="POST",
+        )
+
+        assert result == {"issues": [], "totalCount": 0}
+        assert captured["headers"]["X-ZeroPath-MCP-Token"] == "legacy-token-value"
+        assert captured["headers"]["X-ZeroPath-ChatKit-Token"] == "legacy-token-value"
 
 
-if __name__ == "__main__":
-    # Run smoke test directly
-    print("Running smoke test...")
-    test_smoke()
-    print("\nSmoke test passed!")
-    print("\nTo run all tests: uv run pytest tests/test_tools.py -v")
+class TestLoadConfig:
+    def test_accepts_session_cookie_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_SESSION_COOKIE", "zp_session=session-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.session_cookie == "zp_session=session-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_accepts_mcp_token_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_CHATKIT_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.mcp_token == "mcp-token-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_accepts_legacy_chatkit_token_auth(self, monkeypatch):
+        monkeypatch.delenv("ZEROPATH_TOKEN_ID", raising=False)
+        monkeypatch.delenv("ZEROPATH_TOKEN_SECRET", raising=False)
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+        monkeypatch.delenv("ZEROPATH_MCP_TOKEN", raising=False)
+        monkeypatch.setenv("ZEROPATH_CHATKIT_TOKEN", "legacy-token-value")
+        monkeypatch.setenv("ZEROPATH_BASE_URL", "https://example.com")
+
+        cfg = trpc_client.load_config()
+        assert cfg.mcp_token == "legacy-token-value"
+        assert cfg.token_id is None
+        assert cfg.token_secret is None
+
+    def test_rejects_ambiguous_auth_modes(self, monkeypatch):
+        monkeypatch.setenv("ZEROPATH_TOKEN_ID", "token-id")
+        monkeypatch.setenv("ZEROPATH_TOKEN_SECRET", "token-secret")
+        monkeypatch.setenv("ZEROPATH_MCP_TOKEN", "mcp-token-value")
+        monkeypatch.delenv("ZEROPATH_SESSION_COOKIE", raising=False)
+
+        with pytest.raises(OSError, match="Ambiguous credentials"):
+            trpc_client.load_config()
+
+
+class TestFetchManifest:
+    def test_successful_fetch_v2(self, monkeypatch):
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse(SAMPLE_MANIFEST_V2)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        result = client.fetch_manifest()
+        assert result["version"] == 2
+        assert len(result["tools"]) == 3
+
+    def test_rejects_v1(self, monkeypatch):
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse({"version": 1, "tools": []})
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="Unsupported manifest version"):
+            client.fetch_manifest()
+
+    def test_rejects_bad_version(self, monkeypatch):
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse({"version": 99, "tools": []})
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="Unsupported manifest version"):
+            client.fetch_manifest()
+
+    def test_rejects_http_error(self, monkeypatch):
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse("Not Found", status_code=404)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        client = trpc_client.TrpcClient(trpc_client.load_config())
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            client.fetch_manifest()
+
+
+class TestCallTool:
+    """Test the call_tool handler via create_server()."""
+
+    @pytest.fixture
+    def mock_server_v2(self, monkeypatch):
+        """Create a server with a mocked v2 manifest fetch."""
+
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse(SAMPLE_MANIFEST_V2)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        # Reset cached client so each test gets a fresh server
+        server._CLIENT = None
+        srv = server.create_server()
+        yield srv
+        server._CLIENT = None
+
+    def test_unknown_tool_returns_error(self, mock_server_v2):
+        import asyncio
+
+        import mcp.types as types
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="no.such.tool", arguments=None),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        assert len(result.root.content) == 1
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "NOT_FOUND"
+
+    def test_schema_validation_failure_returns_bad_request(self, mock_server_v2):
+        import asyncio
+
+        import mcp.types as types
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="rules_get", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "BAD_REQUEST"
+        assert payload["error"]["message"] == "Input validation failed"
+
+    def test_tool_error_payload_normalizes_empty_message(self, mock_server_v2, monkeypatch):
+        import asyncio
+
+        import mcp.types as types
+
+        client = server._get_client()
+
+        def fake_call(http_path, payload, *, http_method="POST"):
+            return {
+                "error": {
+                    "code": "API_ERROR",
+                    "message": "",
+                    "httpStatus": 500,
+                    "data": {"requestId": "req_999"},
+                }
+            }
+
+        monkeypatch.setattr(client, "call", fake_call)
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="issues_list", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is True
+        payload = json.loads(result.root.content[0].text)
+        assert payload["error"]["code"] == "API_ERROR"
+        assert payload["error"]["message"] == "Tool issues_list failed"
+        assert payload["error"]["httpStatus"] == 500
+        assert payload["error"]["data"]["requestId"] == "req_999"
+        assert payload["error"]["data"]["messageWasEmpty"] is True
+        assert payload["error"]["data"]["httpPath"] == "/api/v2/issues/search"
+        assert payload["error"]["data"]["httpMethod"] == "POST"
+
+    def test_tool_result_with_error_field_is_not_treated_as_transport_error(self, mock_server_v2, monkeypatch):
+        import asyncio
+
+        import mcp.types as types
+
+        client = server._get_client()
+
+        def fake_call(http_path, payload, *, http_method="POST"):
+            return {
+                "id": "issue_123",
+                "error": "Source parsing failed for one path",
+                "issueStatus": "REVIEWING",
+            }
+
+        monkeypatch.setattr(client, "call", fake_call)
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="issues_list", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is False
+        payload = json.loads(result.root.content[0].text)
+        assert payload["id"] == "issue_123"
+        assert payload["error"] == "Source parsing failed for one path"
+        assert payload["issueStatus"] == "REVIEWING"
+
+    def test_build_tools_v2_roundtrip(self):
+        """Verify _build_tools produces correct Tool objects for v2."""
+        tools, metadata = server._build_tools(SAMPLE_MANIFEST_V2)
+
+        names = [t.name for t in tools]
+        assert "issues_list" in names
+        assert "stats_assets" in names
+        assert "rules_get" in names
+
+        assert metadata["issues_list"]["httpPath"] == "/api/v2/issues/search"
+        assert metadata["issues_list"]["httpMethod"] == "POST"
+        assert metadata["stats_assets"]["httpPath"] == "/api/v2/stats/assets"
+
+
+class TestSecurityCompassIntegration:
+    """Security Compass tools are bridged onto the manifest-driven server.
+
+    These are hardcoded (not in the manifest) and routed to the tRPC surface
+    rather than the REST client, so they need dedicated coverage of the bridge.
+    """
+
+    @pytest.fixture
+    def mock_server_v2(self, monkeypatch):
+        def fake_get(url, headers=None, timeout=None):
+            return DummyResponse(SAMPLE_MANIFEST_V2)
+
+        monkeypatch.setattr(trpc_client.requests, "get", fake_get)
+
+        server._CLIENT = None
+        srv = server.create_server()
+        yield srv
+        server._CLIENT = None
+
+    def test_security_compass_tools_are_listed(self, mock_server_v2):
+        import asyncio
+
+        import mcp.types as types
+        from zeropath_mcp_server.security_compass import SECURITY_COMPASS_TOOL_NAMES
+
+        handler = mock_server_v2.request_handlers[types.ListToolsRequest]
+        req = types.ListToolsRequest(method="tools/list")
+        result = asyncio.run(handler(req))
+
+        names = {t.name for t in result.root.tools}
+        # Manifest tools and Security Compass tools coexist.
+        assert {"issues_list", "stats_assets", "rules_get"} <= names
+        assert SECURITY_COMPASS_TOOL_NAMES <= names
+
+    def test_security_compass_tool_call_routes_to_trpc(self, mock_server_v2, monkeypatch):
+        import asyncio
+
+        import mcp.types as types
+        import zeropath_mcp_server.sc_trpc_client as sc_trpc_client
+
+        captured = {}
+
+        def fake_query(self, procedure, payload):
+            captured["procedure"] = procedure
+            captured["payload"] = dict(payload)
+            return {"integration": None}
+
+        # Patch the class method so the SC client bound inside the server uses it.
+        monkeypatch.setattr(sc_trpc_client.TrpcClient, "query", fake_query)
+
+        handler = mock_server_v2.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="security_compass_get_integration", arguments={}),
+        )
+        result = asyncio.run(handler(req))
+
+        assert result.root.isError is False
+        assert captured["procedure"] == "v1.securityCompass.getIntegration"
+        # organizationId is injected from ZEROPATH_ORG_ID (org_test, set above).
+        assert captured["payload"]["organizationId"] == "org_test"
+        payload = json.loads(result.root.content[0].text)
+        assert payload == {"integration": None}

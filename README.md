@@ -2,11 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Interact with your product security findings using natural language.
+Interact with ZeroPath security findings via MCP-compatible tools.
 
-This open-source MCP server allows developers to query SAST issues, secrets, patches, and more from ZeroPath directly inside AI-assisted tools like Claude Desktop, Cursor, Windsurf, and other MCP-compatible environments.
-
-No dashboards. No manual ticket triage. Just security context where you're already working.
+This MCP server calls ZeroPath tRPC V2 procedures directly (no REST wrappers) and returns structured JSON responses suitable for agent consumption.
 
 ---
 
@@ -15,8 +13,6 @@ No dashboards. No manual ticket triage. Just security context where you're alrea
 Learn more about why we built this and how it fits into the evolving AI development ecosystem:
 
 **[Chat With Your AppSec Scans: Introducing the ZeroPath MCP Server](https://zeropath.com/blog/chat-with-your-appsec-scans)**
-
----
 
 ## Installation
 
@@ -64,40 +60,21 @@ pip install zeropath-mcp-server
 
 ### 1. Generate API Key
 
-Generate an API key from your ZeroPath organization settings at [https://zeropath.com/app/settings/api](https://zeropath.com/app/settings/api)
+Generate a user-scoped or admin API key from ZeroPath Settings.
 
 ### 2. Configure Environment Variables
 
-Set up your environment variables with the API key:
-
 ```bash
+export ZEROPATH_BASE_URL="https://zeropath.com"  # optional (defaults to https://zeropath.com)
 export ZEROPATH_TOKEN_ID=your_token_id
 export ZEROPATH_TOKEN_SECRET=your_token_secret
-```
-
-If you use an enterprise or dedicated ZeroPath deployment, also point the
-server at your host (defaults to `https://zeropath.com`):
-
-```bash
-export ZEROPATH_BASE_URL=https://your-tenant.example.com
-```
-
-### 3. Retrieve Your Organization ID
-
-Run the following command to get your organization ID:
-
-```bash
-curl -X POST https://zeropath.com/api/v1/orgs/list \
-    -H "X-ZeroPath-API-Token-Id: $ZEROPATH_TOKEN_ID" \
-    -H "X-ZeroPath-API-Token-Secret: $ZEROPATH_TOKEN_SECRET" \
-    -H "Content-Type: application/json" \
-    -d '{}'
-```
-
-Then set it as an environment variable:
-
-```bash
 export ZEROPATH_ORG_ID=your_org_id
+```
+
+Use `ZEROPATH_BASE_URL` to target staging or another environment, for example:
+
+```bash
+export ZEROPATH_BASE_URL="https://staging.branch.zeropath.com"
 ```
 
 ---
@@ -119,6 +96,7 @@ Add the following to your MCP config file (Claude Desktop, Cursor, etc.):
         "zeropath-mcp-server"
       ],
       "env": {
+        "ZEROPATH_BASE_URL": "https://zeropath.com",
         "ZEROPATH_TOKEN_ID": "your_token_id",
         "ZEROPATH_TOKEN_SECRET": "your_token_secret",
         "ZEROPATH_ORG_ID": "your_org_id"
@@ -128,11 +106,7 @@ Add the following to your MCP config file (Claude Desktop, Cursor, etc.):
 }
 ```
 
-To pin to a specific version, append `@v0.1.0` or `@main` to the URL.
-
 ### Using source install
-
-If you cloned the repository locally:
 
 ```json
 {
@@ -148,6 +122,7 @@ If you cloned the repository locally:
         "zeropath_mcp_server"
       ],
       "env": {
+        "ZEROPATH_BASE_URL": "https://zeropath.com",
         "ZEROPATH_TOKEN_ID": "your_token_id",
         "ZEROPATH_TOKEN_SECRET": "your_token_secret",
         "ZEROPATH_ORG_ID": "your_org_id"
@@ -159,14 +134,13 @@ If you cloned the repository locally:
 
 ### Using PyPI install (Optional)
 
-If installed from PyPI:
-
 ```json
 {
   "mcpServers": {
     "zeropath": {
       "command": "zeropath-mcp-server",
       "env": {
+        "ZEROPATH_BASE_URL": "https://zeropath.com",
         "ZEROPATH_TOKEN_ID": "your_token_id",
         "ZEROPATH_TOKEN_SECRET": "your_token_secret",
         "ZEROPATH_ORG_ID": "your_org_id"
@@ -176,245 +150,88 @@ If installed from PyPI:
 }
 ```
 
-Replace the environment variable values with your actual credentials.
+---
+
+## Tool Surface (tRPC V2)
+
+Tools are loaded dynamically from the ZeroPath frontend's MCP manifest at startup.
+
+All tool calls use tRPC V2 procedures directly using tRPC v10 HTTP conventions:
+- Queries: `GET /trpc/<procedure>?input=<url-encoded-json>`
+- Mutations: `POST /trpc/<procedure>` with the raw JSON input object as the body (not wrapped).
+
+Successful responses are returned as structured JSON with the `{ "result": { "data": ... } }` wrapper removed. Errors return the tRPC `error` object directly.
+
+The server also performs best-effort client-side input validation using each tool's `inputSchema` from the manifest and returns a `BAD_REQUEST` error before calling tRPC when inputs are invalid. If a schema uses unsupported JSON Schema features, client-side validation is skipped for that call (server-side validation remains authoritative).
+
+In addition to the manifest-driven tools, the server exposes a small set of hardcoded **Security Compass (SD Elements)** tools (see below). These talk to ZeroPath's internal tRPC surface rather than the REST v2 manifest, using the same credentials.
 
 ---
 
-## Available Tools
+## Example Calls
 
-Once connected, the following tools are exposed to your AI assistant:
+List issues:
 
-### Search & Issue Details
+```json
+{
+  "tool": "issues.list",
+  "input": {
+    "page": 1,
+    "pageSize": 25,
+    "statuses": ["PENDING_REVIEW"],
+    "sortBy": "score",
+    "sortOrder": "desc"
+  }
+}
+```
 
-#### `search_vulnerabilities(search_query: str)`
+Archive issues:
 
-Search for vulnerabilities using a keyword query.
+```json
+{
+  "tool": "issues.archive",
+  "input": {
+    "issueIds": ["issue_123", "issue_456"],
+    "reason": "Confirmed duplicate"
+  }
+}
+```
 
-**Parameters:**
-- `search_query` (optional): Search term to filter vulnerabilities
+Create a rule:
 
-**Prompt example:**
-> "Show me all SSRF vulnerabilities in the user service."
+```json
+{
+  "tool": "rules.create",
+  "input": {
+    "name": "Detect unsafe eval",
+    "rule": "Detect any use of eval() on user input",
+    "globPattern": "**/*.js",
+    "sourceTypes": ["FILE_HANDLER"],
+    "repositoryIds": ["repo_123"]
+  }
+}
+```
 
----
+Fetch stats summary:
 
-#### `get_issue(issue_id: str)`
-
-Get full details for a specific vulnerability issue, including patch information if available.
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to retrieve
-
-**Prompt example:**
-> "Give me the details for issue `abc123`."
-
----
-
-#### `approve_patch(issue_id: str)`
-
-Approve a patch for a specific vulnerability issue.
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue whose patch should be approved
-
-**Prompt example:**
-> "Approve the patch for `xyz456`."
-
----
-
-### Bug Triage
-
-#### `mark_true_positive(issue_id: str)`
-
-Mark a security issue as a true positive (confirmed vulnerability).
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to mark
-
-**Prompt example:**
-> "Mark issue `abc123` as a true positive."
-
----
-
-#### `mark_false_positive(issue_id: str)`
-
-Mark a security issue as a false positive (not a real vulnerability).
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to mark
-
-**Prompt example:**
-> "Mark issue `abc123` as a false positive."
+```json
+{
+  "tool": "stats.summary",
+  "input": {
+    "organizationId": "org_123"
+  }
+}
+```
 
 ---
 
-#### `archive_issue(issue_id: str)`
-
-Archive a security issue to remove it from active view.
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to archive
-
-**Prompt example:**
-> "Archive issue `abc123`."
-
----
-
-#### `unarchive_issue(issue_id: str)`
-
-Restore a previously archived issue to active view.
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to unarchive
-
-**Prompt example:**
-> "Unarchive issue `abc123`."
-
----
-
-#### `generate_patch(issue_id: str)`
-
-Generate an automated patch/fix for a security issue.
-
-**Parameters:**
-- `issue_id` (required): The ID of the issue to generate a patch for
-
-**Prompt example:**
-> "Generate a patch for issue `abc123`."
-
----
-
-### Scan Management
-
-#### `start_scan(repository_ids: list[str])`
-
-Start a new security scan on one or more repositories.
-
-**Parameters:**
-- `repository_ids` (required): List of repository IDs to scan
-
-**Prompt example:**
-> "Start a scan on repository `repo_123`."
-
----
-
-#### `list_scans(search_query, repository_ids, scan_type, page, page_size)`
-
-List security scans with optional filtering and pagination.
-
-**Parameters:**
-- `search_query` (optional): Search term to filter scans
-- `repository_ids` (optional): List of repository IDs to filter by
-- `scan_type` (optional): Filter by scan type (`FullScan`, `PrScan`, `SCAScan`)
-- `page` (optional): Page number (default: 1)
-- `page_size` (optional): Results per page (default: 10)
-
-**Prompt example:**
-> "Show me all scans for the last week."
-> "List the most recent PR scans."
-
----
-
-### Repository Management
-
-#### `list_repositories(search_query: str)`
-
-List all repositories in the organization.
-
-**Parameters:**
-- `search_query` (optional): Search term to filter repositories
-
-**Prompt example:**
-> "List all repositories."
-> "Find repositories with 'api' in the name."
-
----
-
-### Statistics & Analytics
-
-#### `get_security_posture()`
-
-Get the overall security posture metrics for the organization, including security score, vulnerability trends, and risk assessment.
-
-**Parameters:** None
-
-**Prompt example:**
-> "What's our current security posture?"
-
----
-
-#### `get_issues_by_vuln_class()`
-
-Get issue statistics grouped by vulnerability class/type. Shows distribution of vulnerabilities by category (XSS, SQLi, etc.).
-
-**Parameters:** None
-
-**Prompt example:**
-> "Show me a breakdown of vulnerabilities by type."
-
----
-
-#### `get_summary_statistics()`
-
-Get aggregated summary statistics across the organization, including total issues, patches, repositories, and key metrics.
-
-**Parameters:** None
-
-**Prompt example:**
-> "Give me a summary of our security statistics."
-
----
-
-### SCA (Software Composition Analysis)
-
-#### `list_sca_vulnerabilities(search_query, repository_ids, ecosystems, transitivity, page, page_size)`
-
-Search for SCA vulnerabilities in dependencies.
-
-**Parameters:**
-- `search_query` (optional): Search term to filter vulnerabilities
-- `repository_ids` (optional): List of repository IDs to filter by
-- `ecosystems` (optional): List of ecosystems to filter (`npm`, `pip`, `maven`, etc.)
-- `transitivity` (optional): Filter by dependency type (`direct`, `transitive`)
-- `page` (optional): Page number (default: 1)
-- `page_size` (optional): Results per page (default: 50)
-
-**Prompt example:**
-> "Show me all critical npm vulnerabilities."
-> "List direct dependency vulnerabilities in the backend repo."
-
----
-
-#### `get_sca_vulnerability(vulnerability_id: str)`
-
-Get detailed information about a specific SCA vulnerability.
-
-**Parameters:**
-- `vulnerability_id` (required): The ID of the vulnerability to retrieve
-
-**Prompt example:**
-> "Get details for SCA vulnerability `vuln_456`."
-
----
-
-#### `list_sca_repositories()`
-
-List repositories with their aggregated dependency inventory information.
-
-**Parameters:** None
-
-**Prompt example:**
-> "Which repos have the most vulnerable dependencies?"
-
----
-
-### Security Compass (SD Elements)
+## Security Compass (SD Elements) Tools
 
 Tools for ZeroPath's [Security Compass / SD Elements integration](https://docs.zeropath.com/integrations/security-compass): link SD Elements projects to ZeroPath repositories, sync countermeasures into scanning rules, and review coverage.
 
 > **Note:** Connecting the integration — supplying the SD Elements base URL and API token — and rotating that token are done in the ZeroPath dashboard (**Settings → Integrations → Security Compass**), never through these tools. API keys should not pass through an AI agent. The tools below operate on the connection saved in the dashboard.
 
-#### `security_compass_get_integration()`
+### `security_compass_get_integration()`
 
 Read the Security Compass integration configured for the organization, including all project-to-repository mappings and their latest sync status.
 
@@ -423,9 +240,7 @@ Read the Security Compass integration configured for the organization, including
 **Prompt example:**
 > "Show me the Security Compass integration configured for my ZeroPath organization."
 
----
-
-#### `security_compass_test_connection(sde_base_url, sde_project_id)`
+### `security_compass_test_connection(sde_base_url, sde_project_id)`
 
 Validate the dashboard-saved SD Elements credentials against a specific project. Returns the countermeasure count on success.
 
@@ -436,9 +251,7 @@ Validate the dashboard-saved SD Elements credentials against a specific project.
 **Prompt example:**
 > "Test my Security Compass connection against project 8."
 
----
-
-#### `security_compass_add_project_mapping(sde_project_id, repository_id)`
+### `security_compass_add_project_mapping(sde_project_id, repository_id)`
 
 Link an SD Elements project to a ZeroPath repository.
 
@@ -449,18 +262,14 @@ Link an SD Elements project to a ZeroPath repository.
 **Prompt example:**
 > "Map SD Elements project 8 to the web-app repository in ZeroPath."
 
----
-
-#### `security_compass_remove_project_mapping(mapping_id)`
+### `security_compass_remove_project_mapping(mapping_id)`
 
 Detach a project-to-repository mapping. Auto-generated rules persist; remove them separately if desired.
 
 **Parameters:**
 - `mapping_id` (required): ID of the mapping to remove
 
----
-
-#### `security_compass_sync_rules(mapping_id)`
+### `security_compass_sync_rules(mapping_id)`
 
 Pull SD Elements countermeasures for a mapping, classify them (SAST-detectable / natural-language rule / unsupported), and create or update ZeroPath rules. Only one sync runs per mapping at a time.
 
@@ -470,9 +279,7 @@ Pull SD Elements countermeasures for a mapping, classify them (SAST-detectable /
 **Prompt example:**
 > "Sync rules for the Payment Service to web-app mapping."
 
----
-
-#### `security_compass_get_mapping_audit(mapping_id)`
+### `security_compass_get_mapping_audit(mapping_id)`
 
 Read the per-countermeasure coverage breakdown for a mapping. Available after the first successful sync.
 
@@ -482,9 +289,7 @@ Read the per-countermeasure coverage breakdown for a mapping. Available after th
 **Prompt example:**
 > "Show me the mapping audit for project 8."
 
----
-
-#### `security_compass_get_sync_history(limit)`
+### `security_compass_get_sync_history(limit)`
 
 Read recent Security Compass audit-log events (sync attempts, mapping changes, integration changes).
 
@@ -501,9 +306,6 @@ Read recent Security Compass audit-log events (sync attempts, mapping changes, i
 ### Running Tests
 
 ```bash
-ZEROPATH_TOKEN_ID=your_id \
-ZEROPATH_TOKEN_SECRET=your_secret \
-ZEROPATH_ORG_ID=your_org \
 uv run pytest tests/ -v
 ```
 
@@ -514,8 +316,6 @@ uv build
 ```
 
 ### Publishing to PyPI (Optional)
-
-If you want to publish to PyPI:
 
 ```bash
 uv publish

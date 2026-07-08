@@ -10,7 +10,7 @@ or:
     zeropath-mcp-server
 """
 
-from zeropath_mcp_server import mcp
+from zeropath_mcp_server.__main__ import main
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    main()

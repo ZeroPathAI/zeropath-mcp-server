@@ -1,7 +1,7 @@
 """Security Compass (SD Elements) integration tools.
 
 Each tool is a thin proxy to a ``v1.securityCompass.*`` tRPC procedure on
-the ZeroPath frontend, called through :class:`~.trpc_client.TrpcClient`.
+the ZeroPath frontend, called through :class:`~.sc_trpc_client.TrpcClient`.
 
 Deliberately absent: any tool that accepts SD Elements credentials.
 Connecting the integration (supplying the SD Elements base URL and API
@@ -17,7 +17,22 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .trpc_client import TrpcClient, UpstreamError
+from .sc_trpc_client import TrpcClient, UpstreamError
+
+# The tools registered by register_security_compass_tools(). Kept as an
+# explicit constant so the low-level server (server.create_server) can route
+# these tool names to the Security Compass FastMCP instance without
+# introspecting it. test_expected_tools_registered pins registration to this
+# same set.
+SECURITY_COMPASS_TOOL_NAMES = {
+    "security_compass_get_integration",
+    "security_compass_test_connection",
+    "security_compass_add_project_mapping",
+    "security_compass_remove_project_mapping",
+    "security_compass_sync_rules",
+    "security_compass_get_mapping_audit",
+    "security_compass_get_sync_history",
+}
 
 
 def _run(client: TrpcClient, kind: str, procedure: str, payload: dict[str, Any]) -> str:
