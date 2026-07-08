@@ -9,13 +9,20 @@ import os
 import requests
 from mcp.server.fastmcp import FastMCP
 
+from .security_compass import register_security_compass_tools
+from .trpc_client import Config as TrpcConfig, TrpcClient
+
 # Environment variables
 token_id = os.getenv("ZEROPATH_TOKEN_ID")
 token_secret = os.getenv("ZEROPATH_TOKEN_SECRET")
 org_id = os.getenv("ZEROPATH_ORG_ID")
 
-# API base URL
-API_BASE_URL = "https://zeropath.com/api/v1"
+# Host of the ZeroPath deployment. Defaults to SaaS; enterprise or dedicated
+# tenants point this at their own host.
+base_url = os.getenv("ZEROPATH_BASE_URL", "https://zeropath.com").rstrip("/")
+
+# Base URL for the public REST v1 API
+API_BASE_URL = f"{base_url}/api/v1"
 
 
 def make_api_request(endpoint, payload=None, include_org=True):
@@ -80,6 +87,23 @@ mcp = FastMCP("Zeropath")
 # Regular user API keys will not have access to most of these endpoints.
 # Generate an org API key at: https://zeropath.com/settings/api-keys
 # =============================================================================
+
+# =============================================================================
+# SECURITY COMPASS (SD ELEMENTS) INTEGRATION TOOLS
+# =============================================================================
+# These live in security_compass.py and talk to ZeroPath's tRPC surface
+# rather than the REST v1 API, using the same credentials.
+register_security_compass_tools(
+    mcp,
+    TrpcClient(
+        TrpcConfig(
+            base_url=base_url,
+            token_id=token_id,
+            token_secret=token_secret,
+            organization_id=org_id,
+        )
+    ),
+)
 
 @mcp.tool()
 def search_vulnerabilities(search_query=None):

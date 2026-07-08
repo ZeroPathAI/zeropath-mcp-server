@@ -75,6 +75,13 @@ export ZEROPATH_TOKEN_ID=your_token_id
 export ZEROPATH_TOKEN_SECRET=your_token_secret
 ```
 
+If you use an enterprise or dedicated ZeroPath deployment, also point the
+server at your host (defaults to `https://zeropath.com`):
+
+```bash
+export ZEROPATH_BASE_URL=https://your-tenant.example.com
+```
+
 ### 3. Retrieve Your Organization ID
 
 Run the following command to get your organization ID:
@@ -398,6 +405,94 @@ List repositories with their aggregated dependency inventory information.
 
 **Prompt example:**
 > "Which repos have the most vulnerable dependencies?"
+
+---
+
+### Security Compass (SD Elements)
+
+Tools for ZeroPath's [Security Compass / SD Elements integration](https://docs.zeropath.com/integrations/security-compass): link SD Elements projects to ZeroPath repositories, sync countermeasures into scanning rules, and review coverage.
+
+> **Note:** Connecting the integration — supplying the SD Elements base URL and API token — and rotating that token are done in the ZeroPath dashboard (**Settings → Integrations → Security Compass**), never through these tools. API keys should not pass through an AI agent. The tools below operate on the connection saved in the dashboard.
+
+#### `security_compass_get_integration()`
+
+Read the Security Compass integration configured for the organization, including all project-to-repository mappings and their latest sync status.
+
+**Parameters:** None
+
+**Prompt example:**
+> "Show me the Security Compass integration configured for my ZeroPath organization."
+
+---
+
+#### `security_compass_test_connection(sde_base_url, sde_project_id)`
+
+Validate the dashboard-saved SD Elements credentials against a specific project. Returns the countermeasure count on success.
+
+**Parameters:**
+- `sde_base_url` (required): Base URL of the SD Elements tenant
+- `sde_project_id` (required): SD Elements project ID to probe
+
+**Prompt example:**
+> "Test my Security Compass connection against project 8."
+
+---
+
+#### `security_compass_add_project_mapping(sde_project_id, repository_id)`
+
+Link an SD Elements project to a ZeroPath repository.
+
+**Parameters:**
+- `sde_project_id` (required): SD Elements project ID
+- `repository_id` (required): ZeroPath repository ID
+
+**Prompt example:**
+> "Map SD Elements project 8 to the web-app repository in ZeroPath."
+
+---
+
+#### `security_compass_remove_project_mapping(mapping_id)`
+
+Detach a project-to-repository mapping. Auto-generated rules persist; remove them separately if desired.
+
+**Parameters:**
+- `mapping_id` (required): ID of the mapping to remove
+
+---
+
+#### `security_compass_sync_rules(mapping_id)`
+
+Pull SD Elements countermeasures for a mapping, classify them (SAST-detectable / natural-language rule / unsupported), and create or update ZeroPath rules. Only one sync runs per mapping at a time.
+
+**Parameters:**
+- `mapping_id` (required): ID of the mapping to sync
+
+**Prompt example:**
+> "Sync rules for the Payment Service to web-app mapping."
+
+---
+
+#### `security_compass_get_mapping_audit(mapping_id)`
+
+Read the per-countermeasure coverage breakdown for a mapping. Available after the first successful sync.
+
+**Parameters:**
+- `mapping_id` (required): ID of the mapping to audit
+
+**Prompt example:**
+> "Show me the mapping audit for project 8."
+
+---
+
+#### `security_compass_get_sync_history(limit)`
+
+Read recent Security Compass audit-log events (sync attempts, mapping changes, integration changes).
+
+**Parameters:**
+- `limit` (optional): Maximum events to return, 1-100 (default: 20)
+
+**Prompt example:**
+> "Show recent Security Compass sync events."
 
 ---
 
