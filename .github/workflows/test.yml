@@ -32,6 +32,7 @@ jobs:
           uv venv --python '${{ matrix.python }}'
           uv pip install --python .venv/bin/python -e '.[dev]'
       - name: Report installed dependency versions
-        run: .venv/bin/python -c 'from importlib.metadata import version; print({name: version(name) for name in ("mcp", "pydantic")})'
+        run: |
+          .venv/bin/python -c 'from importlib.metadata import version; print({name: version(name) for name in ("mcp", "pydantic")})'
       - name: Run unit and stdio protocol tests
         run: .venv/bin/python -m pytest tests/ -v
