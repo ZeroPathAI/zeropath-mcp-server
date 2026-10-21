@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+        dependencies: [locked, fresh]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.9"
+          python-version: ${{ matrix.python }}
+      - name: Install locked dependencies
+        if: matrix.dependencies == 'locked'
+        run: uv sync --locked --extra dev
+      - name: Resolve and install fresh package dependencies
+        if: matrix.dependencies == 'fresh'
+        run: |
+          uv venv --python '${{ matrix.python }}'
+          uv pip install --python .venv/bin/python -e '.[dev]'
+      - name: Report installed dependency versions
+        run: |
+          .venv/bin/python -c 'from importlib.metadata import version; print({name: version(name) for name in ("mcp", "pydantic")})'
+      - name: Run unit and stdio protocol tests
+        run: .venv/bin/python -m pytest tests/ -v
